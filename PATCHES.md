@@ -1,6 +1,6 @@
 # Sightglass fork of `bogdanfinn/tls-client`
 
-**Two functional patches** (below); otherwise this fork exists for package-path identity, the same
+**Three functional patches** (below); otherwise this fork exists for package-path identity, the same
 reason as the `websocket` fork.
 
 Sightglass consumes patched forks of `utls`, `fhttp` and `quic-go-utls` by plain `require` with no
@@ -184,7 +184,8 @@ is what a caller-supplied `ProxyDialerFactory` gets — that dialer is the calle
 - `TestH2ProxyTunnelCarriesTheClientsHTTP2Identity` — the WIRING. White-box on purpose: it asserts
   the dialer `client.go` builds carries the profile's SETTINGS order, connection flow and indexing
   policy. Those two `newConnectDialer` call sites are exactly what an upstream merge drops silently.
-- `TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity` — the WIRE. A loopback `https://` proxy that
+- `TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity` — the WIRE, through the SHIPPED public API
+  (`NewHttpClient` + `WithProxyUrl("https://…")`, reachable because of patch 3). A loopback proxy
   negotiates h2, answers the CONNECT with `:status 200` and holds the tunnel open; the test reads the
   client's SETTINGS frame, its stream-0 WINDOW_UPDATE, its HEADERS-embedded PRIORITY and the first
   octet of `:method` off the socket. Every assertion is against the PROFILE, so it fails on drift
@@ -199,18 +200,47 @@ tunnel back to http2.Transport{}      "the tunnel sent SETTINGS [ENABLE_PUSH]; t
 client.go passes nil                  "the proxy dialer carries no HTTP/2 identity"
 ```
 
-### Still not closed (HR-7)
+### What patch 2 does NOT claim (HR-7)
 
-**`WithInsecureSkipVerify` does not reach the proxy leg.** `connect.go`'s `https://` dial builds its
-own `tls.Config{NextProtos, ServerName}` with no verification hook, so the client option — documented
-as client-wide — silently does not apply to the connection to the proxy. That is an upstream
-inconsistency, and it is *security-relevant*: flipping certificate verification on a leg that did not
-have it deserves its own decision rather than riding along with a fingerprint fix. It is why the wire
-test above reaches the dialer through `newConnectDialer` and supplies its own `DialTLS`.
-
-**No Chrome ground truth for this surface.** What patch 2 asserts is "one identity, not two", which
-is provable locally. Whether Chrome's HTTP/2-to-proxy connection is byte-identical to its
+**No Chrome ground truth for this surface.** What it asserts is "one identity, not two", which is
+provable locally. Whether Chrome's HTTP/2-to-proxy connection is byte-identical to its
 HTTP/2-to-origin connection is *not* asserted: no capture of Chrome against an h2 proxy exists here.
+
+## Patch 3 — the caller's TLS verification reaches the proxy leg
+
+### What was wrong
+
+`connect.go`'s `https://` proxy dial built its own `tls.Config{NextProtos, ServerName}` — no
+verification hook of any kind. So `WithInsecureSkipVerify()` and `TransportOptions.RootCAs`, both
+documented as properties of the CLIENT, applied to the origin connection and silently not to the
+connection to the proxy. A caller who has said "do not verify" and still gets
+`remote error: tls: bad certificate` from their own proxy has been given a surprise, not a safety
+net: the decision was already made, one leg just did not hear it.
+
+It is also what made patch 2 untestable through the public API — a self-signed loopback proxy was
+unreachable from `NewHttpClient`, so the wire test could only have been written against internals.
+
+### The fix
+
+```
+connect.go   connectDialer gains tlsVerify proxyTLSVerify {insecureSkipVerify, rootCAs}, applied to
+             the proxy tls.Config
+h2identity.go newProxyTLSVerify(config) projects the client-wide settings onto the proxy leg
+client.go    both newConnectDialer call sites pass it
+```
+
+Nothing changes unless the caller set one of those options, and setting them already means this.
+
+**Client certificates are deliberately NOT plumbed.** This dial uses `crypto/tls` while
+`TransportOptions.Certificates` is `utls.Certificate` — utls is a fork, not an alias, so the two
+types are unrelated. Converting on a guess would be inventing behaviour; it is recorded here instead.
+
+### Test
+
+The patch-2 wire test is the test: it drives `NewHttpClient` with `WithInsecureSkipVerify()` against a
+self-signed loopback proxy. Ablated by deleting the two `tls.Config` lines, it reports
+`remote error: tls: bad certificate` with the diagnosis attached, which is the failure a caller would
+have hit.
 
 ## Maintenance
 

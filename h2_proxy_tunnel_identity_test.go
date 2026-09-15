@@ -15,7 +15,6 @@ package tls_client
 // tunnel ever drifts from it again rather than against a copy of today's output.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -29,7 +28,6 @@ import (
 	"github.com/Berserk-Automation-Hub/fhttp/http2"
 	"github.com/Berserk-Automation-Hub/fhttp/http2/hpack"
 	"github.com/Berserk-Automation-Hub/tls-client/profiles"
-	tls "github.com/Berserk-Automation-Hub/utls"
 )
 
 type proxyTunnelObservation struct {
@@ -190,13 +188,15 @@ func TestH2ProxyTunnelCarriesTheClientsHTTP2Identity(t *testing.T) {
 	}
 }
 
-// TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity is the WIRE half: it drives the real tunnel path
-// against a loopback https:// proxy that negotiates h2 and reads the client's own bytes.
+// TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity is the WIRE half: it drives the SHIPPED path —
+// NewHttpClient with an https:// proxy — against a loopback proxy that negotiates h2, and reads the
+// client's own bytes off the socket.
 //
-// It reaches the dialer through newConnectDialer rather than through a client because connect.go's
-// proxy TLS dial has no InsecureSkipVerify of its own (upstream never plumbed the client option to
-// the proxy leg -- see PATCHES.md), so a self-signed proxy is unreachable any other way. The
-// DialTLS hook replaces only the certificate check; everything after it is the shipped path.
+// It reaches the proxy through the real client rather than through newConnectDialer because patch 2
+// also plumbs the caller's certificate-verification identity to the proxy leg. Before that,
+// WithInsecureSkipVerify — documented as client-wide — silently did not apply to the connection TO
+// the proxy, so a self-signed proxy was unreachable from the public API and this test could only
+// have been written against internals.
 func TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity(t *testing.T) {
 	ln := listenTLSALPNH2(t)
 	out := make(chan proxyTunnelObservation, 4)
@@ -218,44 +218,38 @@ func TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity(t *testing.T) {
 		}
 		return true
 	}
-
-	d, err := newConnectDialer("https://"+ln.Addr().String(), 10*time.Second, nil, net.Dialer{},
-		make(http.Header), NewNoopLogger(), newH2Identity(profile, &TransportOptions{HPACKIndexingPolicy: policy}))
+	client, err := NewHttpClient(NewNoopLogger(),
+		WithClientProfile(profile),
+		WithInsecureSkipVerify(),
+		// Short: the tunnel completes, then the request past it hangs because nothing is listening on
+		// the other side. Every byte this test reads was written before that point.
+		WithTimeoutSeconds(2),
+		WithDisableHttp3(),
+		WithProxyUrl("https://"+ln.Addr().String()),
+		WithTransportOptions(&TransportOptions{HPACKIndexingPolicy: policy}),
+	)
 	if err != nil {
-		t.Fatalf("newConnectDialer: %v", err)
+		t.Fatalf("NewHttpClient: %v", err)
 	}
-	cd, ok := d.(*connectDialer)
-	if !ok {
-		t.Fatalf("newConnectDialer returned %T", d)
-	}
-	cd.DialTLS = func(network, address string) (net.Conn, string, error) {
-		c, err := tls.Dial(network, address, &tls.Config{
-			InsecureSkipVerify: true,
-			NextProtos:         []string{"h2"},
-			ServerName:         "hpack-policy.test",
-		})
-		if err != nil {
-			return nil, "", err
-		}
-		if err := c.Handshake(); err != nil {
-			return nil, "", err
-		}
-		return c, c.ConnectionState().NegotiatedProtocol, nil
-	}
+	t.Cleanup(client.CloseIdleConnections)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	tunnel, err := cd.DialContext(ctx, "tcp", "origin.invalid:443")
+	req, err := http.NewRequest(http.MethodGet, "https://origin.invalid/", nil)
 	if err != nil {
-		t.Fatalf("DialContext through the h2 proxy: %v", err)
+		t.Fatalf("NewRequest: %v", err)
 	}
-	t.Cleanup(func() { _ = tunnel.Close() })
+	// The tunnel completes (the proxy answers the CONNECT with 200); the request beyond it does not,
+	// because nothing is listening on the other side. The bytes the client already wrote to the proxy
+	// are the point.
+	_, _ = client.Do(req)
 
 	var obs proxyTunnelObservation
 	select {
 	case obs = <-out:
 	case err := <-errc:
-		t.Fatalf("proxy: %v", err)
+		// "bad certificate" here means WithInsecureSkipVerify did not reach the proxy leg, which is
+		// half of what patch 2 fixes — say so rather than leaving a TLS error to be interpreted.
+		t.Fatalf("proxy: %v (a certificate error here means the client's WithInsecureSkipVerify is not "+
+			"reaching the TLS dial to the PROXY, only the one to the origin)", err)
 	case <-time.After(15 * time.Second):
 		t.Fatal("the client sent no HEADERS to the proxy")
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -99,12 +100,31 @@ type connectDialer struct {
 	// indexing policy, on the first frames of the connection. nil keeps the old behaviour, which is
 	// what a caller-supplied ProxyDialerFactory gets.
 	h2 *h2Identity
+
+	// tlsVerify is the certificate-verification identity for the TLS connection TO THE PROXY. This
+	// dial built its own tls.Config with no verification hook at all, so WithInsecureSkipVerify --
+	// documented as client-wide -- silently did not apply to the proxy leg, and neither did
+	// TransportOptions.RootCAs. A caller who turns verification off means it for every leg; one that
+	// still verifies is a surprise, not a safety net, because the caller has already said otherwise.
+	tlsVerify proxyTLSVerify
+}
+
+// proxyTLSVerify is the subset of a caller's TLS configuration that applies to the connection to the
+// proxy itself. It is deliberately not the whole tls.Config: ServerName and NextProtos belong to the
+// proxy dial, not to the caller.
+// It carries no client certificates: this dial uses crypto/tls while TransportOptions.Certificates
+// is utls's own Certificate type (utls is a fork, not an alias), so a client certificate for the
+// PROXY leg would need a conversion this fork has no ground truth for. Recorded in PATCHES.md
+// rather than converted on a guess.
+type proxyTLSVerify struct {
+	insecureSkipVerify bool
+	rootCAs            *x509.CertPool
 }
 
 // newConnectDialer creates a dialer to issue CONNECT requests and tunnel traffic via HTTP/S proxy.
 // proxyUrlStr must provide Scheme and Host, may provide credentials and port.
 // Example: https://username:password@golang.org:443
-func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.TCPAddr, configDialer net.Dialer, connectHeaders http.Header, logger Logger, h2 *h2Identity) (proxy.ContextDialer, error) {
+func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.TCPAddr, configDialer net.Dialer, connectHeaders http.Header, logger Logger, h2 *h2Identity, tlsVerify proxyTLSVerify) (proxy.ContextDialer, error) {
 	proxyUrl, err := url.Parse(proxyUrlStr)
 	if err != nil {
 		return nil, err
@@ -148,6 +168,7 @@ func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.
 		DefaultHeader:     connectHeaders.Clone(),
 		EnableH2ConnReuse: true,
 		h2:                h2,
+		tlsVerify:         tlsVerify,
 	}
 
 	if proxyUrl.User != nil {
@@ -324,8 +345,10 @@ func (c *connectDialer) DialContext(ctx context.Context, network, address string
 			}
 		} else {
 			tlsConf := tls.Config{
-				NextProtos: []string{"h2", "http/1.1"},
-				ServerName: c.ProxyUrl.Hostname(),
+				NextProtos:         []string{"h2", "http/1.1"},
+				ServerName:         c.ProxyUrl.Hostname(),
+				InsecureSkipVerify: c.tlsVerify.insecureSkipVerify,
+				RootCAs:            c.tlsVerify.rootCAs,
 			}
 			tlsConn, err := tls.Dial(network, c.ProxyUrl.Host, &tlsConf)
 			if err != nil {

@@ -87,3 +87,14 @@ func (id *h2Identity) apply(t *http2.Transport) {
 	t.Settings = id.settings
 	t.SettingsOrder = id.settingsOrder
 }
+
+// newProxyTLSVerify projects the caller's client-wide TLS configuration onto the connection to the
+// proxy. Both fields it reads are documented as properties of the CLIENT, and upstream applied them
+// only to the origin leg.
+func newProxyTLSVerify(config *httpClientConfig) proxyTLSVerify {
+	v := proxyTLSVerify{insecureSkipVerify: config.insecureSkipVerify}
+	if config.transportOptions != nil {
+		v.rootCAs = config.transportOptions.RootCAs
+	}
+	return v
+}

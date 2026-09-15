@@ -219,7 +219,7 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	clientProfile := config.clientProfile
 
 	if config.proxyUrl != "" && config.proxyDialerFactory == nil {
-		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, config.localAddr, config.dialer, config.connectHeaders, logger, newH2Identity(clientProfile, config.transportOptions))
+		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, config.localAddr, config.dialer, config.connectHeaders, logger, newH2Identity(clientProfile, config.transportOptions), newProxyTLSVerify(config))
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
@@ -376,7 +376,7 @@ func (c *httpClient) applyProxy() error {
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)
-		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.dialer, c.config.connectHeaders, c.logger, newH2Identity(c.config.clientProfile, c.config.transportOptions))
+		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.dialer, c.config.connectHeaders, c.logger, newH2Identity(c.config.clientProfile, c.config.transportOptions), newProxyTLSVerify(c.config))
 		if err != nil {
 			c.logger.Error("failed to create proxy connect dialer: %s", err.Error())
 			return err
