@@ -1,5 +1,5 @@
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.1 h1:pB4tuVXAX0RFoc6c2mh2caTNvTlKgX/+T5W4vBf7A2I=
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.1/go.mod h1:G49b41b5+54ARXvdQxefhJsnpE6xSkV4cQ9qu7f0VSo=
+github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.2 h1:q47ZX8cLPvrumbETeDtPJ6anRz9C6i20/AitZ++hIyA=
+github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.2/go.mod h1:G49b41b5+54ARXvdQxefhJsnpE6xSkV4cQ9qu7f0VSo=
 github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.1 h1:TovjKotQRnuH7N3FvqX6QWgrWxXcvRS7LLAzur9LhS4=
 github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.1/go.mod h1:osw6mi2AsRgzMKAEGv6MKsSmH0/5+TvS8GX4xwWjHj8=
 github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.1 h1:6mM/P3b/VcMyRpKxt8UZAVgf6gX7rw51zoHjT3NZrek=

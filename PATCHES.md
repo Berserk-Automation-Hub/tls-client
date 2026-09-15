@@ -1,7 +1,7 @@
 # Sightglass fork of `bogdanfinn/tls-client`
 
-**There are no functional patches here.** Like the `websocket` fork, this exists for package-path
-identity alone.
+**One functional patch** (patch 1, below); otherwise this fork exists for package-path identity, the
+same reason as the `websocket` fork.
 
 Sightglass consumes patched forks of `utls`, `fhttp` and `quic-go-utls` by plain `require` with no
 `replace` directive, so each carries its own module path. `tls-client` imports all three (plus
@@ -46,10 +46,10 @@ gofmt: identical to upstream's baseline
 go build ./... clean
 ```
 
-The one-test difference is a **network flake**, not a regression:
-`TestClient_HeaderOrderWithContentLengthHttp1` failed once with
-`read tcp …->205.185.123.167:443: read: connection reset by peer` — it hits a live external host —
-and passes 3/3 on re-run.
+The one-test difference is a **network flake**, not a regression: the extra failure is not stable
+(`TestClient_HeaderOrderWithContentLengthHttp1` in one run, `TestHTTP3WithChromeOnCloudflare` in
+another), both hit live external hosts, and both pass 3/3 on re-run in **this fork and the pristine
+baseline alike**.
 
 ## Pre-existing upstream failure (HR-7 — recorded, not ours)
 
@@ -66,6 +66,79 @@ tls-client's own Chrome-133 H3 profile emits no `SETTINGS_MAX_FIELD_SECTION_SIZE
 own fixture expects one. Worth knowing because it is H3-fingerprint-adjacent — but Sightglass does
 not use tls-client's HTTP/3 path at all (`quich3` owns QUIC/H3 and builds its SETTINGS from the
 profile), so it is on no path we depend on. Recorded rather than hidden.
+
+## Patch 1 — `TransportOptions.HPACKIndexingPolicy`
+
+### What it is
+
+`fhttp v0.6.9-sightglass.2` added `http2.Transport.HPACKIndexingPolicy`, a per-field predicate that
+decides whether the request encoder may insert a header into the connection's HPACK dynamic table.
+It is the same hook quiche's `HpackEncoder` carries (`should_index_`, installed by
+`SetIndexingPolicy`). This patch gives a tls-client caller a way to reach it.
+
+```
+client_options.go   TransportOptions gains HPACKIndexingPolicy func(hpack.HeaderField) bool
+roundtripper.go     t2.HPACKIndexingPolicy = rt.transportOptions.HPACKIndexingPolicy
+                    (inside the existing `if rt.transportOptions != nil` block, next to
+                     DisableCompression, so it is set before the first ClientConn exists)
+go.mod              fhttp v0.6.9-sightglass.1 -> v0.6.9-sightglass.2
+```
+
+Two `.go` lines of behaviour, plus a doc comment and one import.
+
+### Why it has to exist here
+
+RFC 7541 lets an encoder represent one header field several ways, so the representation it picks is
+an **encoder signature**, not a protocol fact. The choice for `:path` alone separates Chrome from
+every Go client built on `x/net/http2` on every request whose path is not the literal `/`. And
+because incremental indexing mutates **connection** state, one differing decision is not one wrong
+byte: the dynamic table diverges for the life of the connection, so every later field's index and
+every later block's length diverge too.
+
+The policy cannot live on `ClientProfile`. That struct is the serialisable browser identity — it is
+built from JSON by the CFFI layer (`cffi_src/factory.go`) and its constructor takes fourteen
+positional arguments — and a predicate is neither serialisable nor expressible there.
+`TransportOptions` is already the bag for code-supplied, non-serialisable knobs
+(`KeyLogWriter io.Writer`, `RootCAs *x509.CertPool`, `Certificates`), which is exactly what this is.
+
+### Why a predicate and not a name list
+
+Because that is the shape the decision has in the implementation being emulated: quiche's
+`HpackEncoder` consults `should_index_(name, value)` per field. A caller that wants a name list can
+close over one; a caller that wants a rule cannot recover it from a list.
+
+### Additive by construction
+
+`nil` keeps fhttp's own rule (index every field that is not `Sensitive` and fits the table), so a
+client that never sets the field is byte-identical to one built before the field existed. Existing
+callers, including the CFFI surface, are untouched.
+
+### Test
+
+`hpack_indexing_policy_test.go` — `TestHPACKIndexingPolicyReachesTheEncoder`. A loopback TLS+ALPN-h2
+listener answers the client preface with an empty SETTINGS frame, never answers the request, and
+hands back the first HEADERS block fragment. The assertion is made on the **raw** block, walked by
+RFC 7541 prefix bits in the test itself — deliberately not through `hpack.Decoder`, which would
+resolve every representation to the same header list and hide the difference. The same request runs
+twice:
+
+```
+policy nil                          :path first octet 0x44  (6.2.1, incremental indexing, name idx 4)
+policy refusing pseudo-headers      :path first octet 0x04  (6.2.2, without indexing,     name idx 4)
+```
+
+Ablated: deleting the `roundtripper.go` line makes the second case report `0x44`, so the test is
+carrying the patch and not merely agreeing with it.
+
+### Known gap this patch does NOT close (HR-7)
+
+`connect.go:341` builds `http2.Transport{}` — a **zero value** — for the HTTP/2 tunnel to an
+`https://` proxy. That transport carries no SETTINGS, no settings order, no connection flow, no
+header priority and now no HPACK policy: the CONNECT request a client sends to an h2-speaking proxy
+is not browser-shaped in any respect. Wiring only the HPACK policy there would be a cosmetic fix to
+a surface that is wrong in ten other ways, so it is recorded here instead of half-fixed. Sightglass
+does not reach it (its proxies are `http://` CONNECT and `socks5://`, neither of which negotiates
+ALPN with the proxy).
 
 ## Maintenance
 

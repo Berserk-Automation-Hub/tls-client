@@ -485,6 +485,11 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 
 		if rt.transportOptions != nil {
 			t2.DisableCompression = rt.transportOptions.DisableCompression
+			// The policy has to reach the Transport before the first ClientConn exists: fhttp builds
+			// one hpack.Encoder per connection in newClientConn, and its dynamic table is connection
+			// state, so installing the policy later would leave the first request block -- the one
+			// every fingerprinting service reads -- encoded by the default rule.
+			t2.HPACKIndexingPolicy = rt.transportOptions.HPACKIndexingPolicy
 
 			t1 := t2.GetT1()
 			if t1 != nil {

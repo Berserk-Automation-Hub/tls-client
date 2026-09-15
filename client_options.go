@@ -10,6 +10,7 @@ import (
 	"time"
 
 	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/fhttp/http2/hpack"
 	"github.com/Berserk-Automation-Hub/tls-client/profiles"
 	tls "github.com/Berserk-Automation-Hub/utls"
 	"golang.org/x/net/proxy"
@@ -37,6 +38,24 @@ type TransportOptions struct {
 	ReadBufferSize         int   // If zero, a default (currently 4KB) is used.
 	DisableKeepAlives      bool
 	DisableCompression     bool
+	// HPACKIndexingPolicy decides, per header field, whether the HTTP/2 request encoder may insert
+	// that field into the connection's HPACK dynamic table (RFC 7541 6.2.1, "with incremental
+	// indexing") or must spell it out without inserting it (6.2.2, "without indexing").
+	//
+	// RFC 7541 leaves the choice entirely to the encoder, which is exactly why it is an encoder
+	// signature rather than a protocol property: for one identical header list two conforming
+	// encoders emit different bytes, and because incremental indexing mutates CONNECTION state, a
+	// single differing decision makes every later field index -- and every later block's length --
+	// differ too.
+	//
+	// It is a predicate rather than a name list because that is the shape the decision really has:
+	// quiche's HpackEncoder carries the same hook (should_index_, installed by SetIndexingPolicy),
+	// so a caller emulating a browser can express that browser's observed rule directly.
+	//
+	// nil keeps fhttp's own rule (index every field that is not marked Sensitive and fits the
+	// table), so the field is additive: a client that never sets it is byte-identical to one built
+	// before the field existed.
+	HPACKIndexingPolicy func(hpack.HeaderField) bool
 }
 
 type (
