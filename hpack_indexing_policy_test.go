@@ -52,9 +52,10 @@ type hpackPolicyTestServer struct {
 	errc  chan error
 }
 
-func startHPACKPolicyServer(t *testing.T) *hpackPolicyTestServer {
+// listenTLSALPNH2 is a loopback TLS listener with a throwaway self-signed certificate that
+// negotiates h2. Callers use WithInsecureSkipVerify, so the certificate only has to parse.
+func listenTLSALPNH2(t *testing.T) net.Listener {
 	t.Helper()
-
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -71,7 +72,6 @@ func startHPACKPolicyServer(t *testing.T) *hpackPolicyTestServer {
 	if err != nil {
 		t.Fatalf("self-sign: %v", err)
 	}
-
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
 		NextProtos:   []string{"h2"},
@@ -80,6 +80,12 @@ func startHPACKPolicyServer(t *testing.T) *hpackPolicyTestServer {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	return ln
+}
+
+func startHPACKPolicyServer(t *testing.T) *hpackPolicyTestServer {
+	t.Helper()
+	ln := listenTLSALPNH2(t)
 
 	s := &hpackPolicyTestServer{
 		addr:  ln.Addr().String(),
@@ -225,6 +231,12 @@ func skipString(t *testing.T, b []byte) int {
 // still empty. A dynamic index here would mean the test is reading the wrong block.
 func firstOctetOfPath(t *testing.T, block []byte) byte {
 	t.Helper()
+	return firstOctetOfName(t, block, ":path")
+}
+
+// firstOctetOfName is firstOctetOfPath for any header name.
+func firstOctetOfName(t *testing.T, block []byte, want string) byte {
+	t.Helper()
 	nameAt := func(idx uint64) string {
 		if idx == 0 || idx >= uint64(len(hpackStaticNames)) {
 			t.Fatalf("header index %d is not a static-table entry; this is not the first block of a fresh connection", idx)
@@ -237,7 +249,7 @@ func firstOctetOfPath(t *testing.T, block []byte) byte {
 		switch {
 		case start&0x80 != 0: // 6.1 indexed header field
 			idx, used := readVarint(t, block[i:], 7)
-			if nameAt(idx) == ":path" {
+			if nameAt(idx) == want {
 				return start
 			}
 			i += used
@@ -262,13 +274,13 @@ func firstOctetOfPath(t *testing.T, block []byte) byte {
 				name = nameAt(idx)
 			}
 			j += skipString(t, block[j:]) // the value
-			if name == ":path" {
+			if name == want {
 				return start
 			}
 			i = j
 		}
 	}
-	t.Fatal("no :path field in the header block")
+	t.Fatalf("no %s field in the header block", want)
 	return 0
 }
 

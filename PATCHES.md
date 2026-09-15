@@ -1,7 +1,7 @@
 # Sightglass fork of `bogdanfinn/tls-client`
 
-**One functional patch** (patch 1, below); otherwise this fork exists for package-path identity, the
-same reason as the `websocket` fork.
+**Two functional patches** (below); otherwise this fork exists for package-path identity, the same
+reason as the `websocket` fork.
 
 Sightglass consumes patched forks of `utls`, `fhttp` and `quic-go-utls` by plain `require` with no
 `replace` directive, so each carries its own module path. `tls-client` imports all three (plus
@@ -40,13 +40,14 @@ Based on **v1.16.0**, the latest upstream, not the v1.15.1 Sightglass pinned.
 ## Verification, against a pristine v1.16.0 baseline
 
 ```
-fork: 2 failing tests    pristine: 1 failing test
+fork: 1 failing test     pristine: 1 failing test
 REGRESSIONS: none
 gofmt: identical to upstream's baseline
 go build ./... clean
 ```
 
-The one-test difference is a **network flake**, not a regression: the extra failure is not stable
+The only failure is the pre-existing upstream one below; it fails in the pristine baseline too. Runs
+that show one extra red are a **network flake**, not a regression: the extra failure is not stable
 (`TestClient_HeaderOrderWithContentLengthHttp1` in one run, `TestHTTP3WithChromeOnCloudflare` in
 another), both hit live external hosts, and both pass 3/3 on re-run in **this fork and the pristine
 baseline alike**.
@@ -130,15 +131,86 @@ policy refusing pseudo-headers      :path first octet 0x04  (6.2.2, without inde
 Ablated: deleting the `roundtripper.go` line makes the second case report `0x44`, so the test is
 carrying the patch and not merely agreeing with it.
 
-### Known gap this patch does NOT close (HR-7)
+### The gap this patch opened, closed by patch 2
 
-`connect.go:341` builds `http2.Transport{}` — a **zero value** — for the HTTP/2 tunnel to an
-`https://` proxy. That transport carries no SETTINGS, no settings order, no connection flow, no
-header priority and now no HPACK policy: the CONNECT request a client sends to an h2-speaking proxy
-is not browser-shaped in any respect. Wiring only the HPACK policy there would be a cosmetic fix to
-a surface that is wrong in ten other ways, so it is recorded here instead of half-fixed. Sightglass
-does not reach it (its proxies are `http://` CONNECT and `socks5://`, neither of which negotiates
-ALPN with the proxy).
+Patch 1 left `connect.go`'s proxy tunnel on a zero-value `http2.Transport`, so it would have been the
+one HTTP/2 path in the module without an indexing policy. That is patch 2.
+
+## Patch 2 — one HTTP/2 identity, not two
+
+### What was wrong
+
+This module builds an `http2.Transport` in **two** places:
+
+```
+roundtripper.go   the ORIGIN connection   — SETTINGS + order, connection flow, HEADERS priority,
+                                            pseudo-header order, first stream id, HPACK policy
+connect.go:341    the TUNNEL to an https:// proxy — http2.Transport{}   <- a ZERO VALUE
+```
+
+So a client carrying a browser profile spoke a browser's HTTP/2 to the origin and fhttp's own
+defaults to the proxy. Measured, by ablating the fix and reading the bytes off a loopback proxy:
+
+```
+profile (Chrome_133)  SETTINGS [HEADER_TABLE_SIZE ENABLE_PUSH INITIAL_WINDOW_SIZE MAX_HEADER_LIST_SIZE]
+                      WINDOW_UPDATE 15663105, HEADERS-embedded PRIORITY present
+zero-value Transport  SETTINGS [ENABLE_PUSH]
+                      no WINDOW_UPDATE, no embedded PRIORITY, no HPACK indexing policy
+```
+
+One setting against four, on the first frames of the connection, before any request — and the
+`CONNECT` request's own header block encoded by a different rule than every origin request on the
+same client. Two HTTP/2 identities in one binary, and the proxy operator sees the one that is not a
+browser.
+
+### The fix
+
+```
+h2identity.go     NEW — h2Identity: the wire identity a ClientProfile describes, apart from the
+                  per-path plumbing (dialer, TLS config, timeouts, compression) a Transport carries
+roundtripper.go   the origin Transport now gets its identity from that value
+connect.go        connectDialer gains an h2 *h2Identity; the tunnel Transport applies it
+client.go         both newConnectDialer call sites pass newH2Identity(clientProfile, transportOptions)
+```
+
+Keeping it in one value is the point: a field added to `h2Identity` reaches both paths, and a field
+added to only one `Transport` literal shows up as an asymmetry. `nil` keeps the old behaviour, which
+is what a caller-supplied `ProxyDialerFactory` gets — that dialer is the caller's, not ours.
+
+### Tests
+
+`h2_proxy_tunnel_identity_test.go`, two halves, because the failure modes are different:
+
+- `TestH2ProxyTunnelCarriesTheClientsHTTP2Identity` — the WIRING. White-box on purpose: it asserts
+  the dialer `client.go` builds carries the profile's SETTINGS order, connection flow and indexing
+  policy. Those two `newConnectDialer` call sites are exactly what an upstream merge drops silently.
+- `TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity` — the WIRE. A loopback `https://` proxy that
+  negotiates h2, answers the CONNECT with `:status 200` and holds the tunnel open; the test reads the
+  client's SETTINGS frame, its stream-0 WINDOW_UPDATE, its HEADERS-embedded PRIORITY and the first
+  octet of `:method` off the socket. Every assertion is against the PROFILE, so it fails on drift
+  rather than agreeing with a copy of today's output.
+
+Ablated, one each:
+
+```
+tunnel back to http2.Transport{}      "the tunnel sent SETTINGS [ENABLE_PUSH]; the profile's order
+                                       is [HEADER_TABLE_SIZE ENABLE_PUSH INITIAL_WINDOW_SIZE
+                                       MAX_HEADER_LIST_SIZE]"
+client.go passes nil                  "the proxy dialer carries no HTTP/2 identity"
+```
+
+### Still not closed (HR-7)
+
+**`WithInsecureSkipVerify` does not reach the proxy leg.** `connect.go`'s `https://` dial builds its
+own `tls.Config{NextProtos, ServerName}` with no verification hook, so the client option — documented
+as client-wide — silently does not apply to the connection to the proxy. That is an upstream
+inconsistency, and it is *security-relevant*: flipping certificate verification on a leg that did not
+have it deserves its own decision rather than riding along with a fingerprint fix. It is why the wire
+test above reaches the dialer through `newConnectDialer` and supplies its own `DialTLS`.
+
+**No Chrome ground truth for this surface.** What patch 2 asserts is "one identity, not two", which
+is provable locally. Whether Chrome's HTTP/2-to-proxy connection is byte-identical to its
+HTTP/2-to-origin connection is *not* asserted: no capture of Chrome against an h2 proxy exists here.
 
 ## Maintenance
 

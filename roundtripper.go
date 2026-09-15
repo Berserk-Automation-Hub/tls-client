@@ -57,6 +57,11 @@ type roundTripper struct {
 	cachedKinds    map[string]transportKind
 	cachedKindsLck sync.Mutex
 
+	// h2 is the HTTP/2 wire identity, shared with the proxy-tunnel Transport (connect.go) so the
+	// two cannot drift. The individual fields below are kept because other code paths (the racer,
+	// HTTP/3) read them directly.
+	h2 *h2Identity
+
 	headerPriority      *http2.PriorityParam
 	settings            map[http2.SettingID]uint32
 	transportOptions    *TransportOptions
@@ -476,20 +481,17 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		t2 := http2.Transport{
 			DialTLS:         rt.dialTLSHTTP2,
 			TLSClientConfig: utlsConfig,
-			ConnectionFlow:  rt.connectionFlow,
-			HeaderPriority:  rt.headerPriority,
 			IdleConnTimeout: idleConnectionTimeout,
-			InitialStreamID: rt.initialStreamID,
 			AllowHTTP:       rt.allowHTTP,
 		}
+		// The wire identity -- SETTINGS and their order, connection flow, HEADERS priority,
+		// pseudo-header order, first stream id, HPACK indexing policy -- comes from one value shared
+		// with the proxy-tunnel Transport in connect.go, so the two cannot drift into two different
+		// HTTP/2 clients in one binary.
+		rt.h2.apply(&t2)
 
 		if rt.transportOptions != nil {
 			t2.DisableCompression = rt.transportOptions.DisableCompression
-			// The policy has to reach the Transport before the first ClientConn exists: fhttp builds
-			// one hpack.Encoder per connection in newClientConn, and its dynamic table is connection
-			// state, so installing the policy later would leave the first request block -- the one
-			// every fingerprinting service reads -- encoded by the default rule.
-			t2.HPACKIndexingPolicy = rt.transportOptions.HPACKIndexingPolicy
 
 			t1 := t2.GetT1()
 			if t1 != nil {
@@ -508,40 +510,6 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 			}
 		}
 
-		if rt.pseudoHeaderOrder == nil {
-			t2.PseudoHeaderOrder = []string{}
-		} else {
-			t2.PseudoHeaderOrder = rt.pseudoHeaderOrder
-		}
-
-		if rt.settings == nil {
-			// when we not provide a map of custom http2 settings
-			t2.Settings = map[http2.SettingID]uint32{
-				http2.SettingMaxConcurrentStreams: 1000,
-				http2.SettingMaxFrameSize:         16384,
-				http2.SettingInitialWindowSize:    6291456,
-				http2.SettingHeaderTableSize:      65536,
-			}
-
-			keys := make([]http2.SettingID, len(t2.Settings))
-
-			i := 0
-			// attention: the order might be random here for default values!
-			for k := range t2.Settings {
-				keys[i] = k
-				i++
-			}
-
-			t2.SettingsOrder = keys
-		} else {
-			// use custom http2 settings
-			t2.Settings = rt.settings
-			t2.SettingsOrder = rt.settingsOrder
-		}
-
-		t2.Priorities = rt.priorities
-
-		t2.PushHandler = &http2.DefaultPushHandler{}
 		rt.cachedTransports[addr] = &t2
 		rt.setCachedKind(addr, transportHTTP2)
 	case http3.NextProtoH3:
@@ -710,6 +678,7 @@ func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *Tra
 		settings:                    clientProfile.GetSettings(),
 		settingsOrder:               clientProfile.GetSettingsOrder(),
 		priorities:                  clientProfile.GetPriorities(),
+		h2:                          newH2Identity(clientProfile, transportOptions),
 		headerPriority:              clientProfile.GetHeaderPriority(),
 		pseudoHeaderOrder:           clientProfile.GetPseudoHeaderOrder(),
 		insecureSkipVerify:          insecureSkipVerify,

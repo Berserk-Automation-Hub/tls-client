@@ -90,12 +90,21 @@ type connectDialer struct {
 	Timeout           time.Duration
 	cacheH2Mu         sync.Mutex
 	EnableH2ConnReuse bool
+
+	// h2 is the HTTP/2 wire identity to speak to an h2-negotiating proxy: the same value the origin
+	// Transport uses (roundtripper.go). Before it existed this dialer built a ZERO-VALUE
+	// http2.Transport, so a client with a browser profile spoke a browser's HTTP/2 to the origin and
+	// fhttp's defaults to the proxy -- different SETTINGS and SETTINGS order, no connection
+	// WINDOW_UPDATE, no HEADERS-embedded PRIORITY, a different pseudo-header order and no HPACK
+	// indexing policy, on the first frames of the connection. nil keeps the old behaviour, which is
+	// what a caller-supplied ProxyDialerFactory gets.
+	h2 *h2Identity
 }
 
 // newConnectDialer creates a dialer to issue CONNECT requests and tunnel traffic via HTTP/S proxy.
 // proxyUrlStr must provide Scheme and Host, may provide credentials and port.
 // Example: https://username:password@golang.org:443
-func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.TCPAddr, configDialer net.Dialer, connectHeaders http.Header, logger Logger) (proxy.ContextDialer, error) {
+func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.TCPAddr, configDialer net.Dialer, connectHeaders http.Header, logger Logger, h2 *h2Identity) (proxy.ContextDialer, error) {
 	proxyUrl, err := url.Parse(proxyUrlStr)
 	if err != nil {
 		return nil, err
@@ -138,6 +147,7 @@ func newConnectDialer(proxyUrlStr string, timeout time.Duration, localAddr *net.
 		Timeout:           timeout,
 		DefaultHeader:     connectHeaders.Clone(),
 		EnableH2ConnReuse: true,
+		h2:                h2,
 	}
 
 	if proxyUrl.User != nil {
@@ -338,7 +348,10 @@ func (c *connectDialer) DialContext(ctx context.Context, network, address string
 	case "http/1.1":
 		return connectHttp1(rawConn)
 	case "h2":
+		// The tunnel to the proxy is a real HTTP/2 connection the proxy operator can fingerprint, so
+		// it speaks the SAME identity as the origin connection rather than fhttp's defaults.
 		t := http2.Transport{}
+		c.h2.apply(&t)
 		h2clientConn, err := t.NewClientConn(rawConn)
 		if err != nil {
 			_ = rawConn.Close()

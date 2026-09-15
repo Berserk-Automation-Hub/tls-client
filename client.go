@@ -216,8 +216,10 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	var dialer proxy.ContextDialer
 	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer)
 
+	clientProfile := config.clientProfile
+
 	if config.proxyUrl != "" && config.proxyDialerFactory == nil {
-		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, config.localAddr, config.dialer, config.connectHeaders, logger)
+		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, config.localAddr, config.dialer, config.connectHeaders, logger, newH2Identity(clientProfile, config.transportOptions))
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
@@ -259,8 +261,6 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	} else {
 		bandwidthTracker = bandwidth.NewNopeTracker()
 	}
-
-	clientProfile := config.clientProfile
 
 	transport, err := newRoundTripper(clientProfile, config.transportOptions, config.serverNameOverwrite, config.insecureSkipVerify, config.withRandomTlsExtensionOrder, config.forceHttp1, config.disableHttp3, config.disableSessionTickets, config.enableProtocolRacing, config.certificatePins, config.badPinHandler, config.disableIPV6, config.disableIPV4, bandwidthTracker, config.proxyUrl, dialer)
 	if err != nil {
@@ -376,7 +376,7 @@ func (c *httpClient) applyProxy() error {
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)
-		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.dialer, c.config.connectHeaders, c.logger)
+		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.dialer, c.config.connectHeaders, c.logger, newH2Identity(c.config.clientProfile, c.config.transportOptions))
 		if err != nil {
 			c.logger.Error("failed to create proxy connect dialer: %s", err.Error())
 			return err
