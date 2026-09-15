@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/http2"
-	"github.com/bogdanfinn/quic-go-utls/http3"
-	"github.com/bogdanfinn/tls-client/bandwidth"
-	"github.com/bogdanfinn/tls-client/profiles"
-	tls "github.com/bogdanfinn/utls"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/fhttp/http2"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/http3"
+	"github.com/Berserk-Automation-Hub/tls-client/bandwidth"
+	"github.com/Berserk-Automation-Hub/tls-client/profiles"
+	tls "github.com/Berserk-Automation-Hub/utls"
 	"golang.org/x/net/proxy"
 )
 

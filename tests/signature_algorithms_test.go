@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	tls_client "github.com/Berserk-Automation-Hub/tls-client"
 )
 
 // isGreaseValue reports whether v is one of the 16 GREASE values defined in

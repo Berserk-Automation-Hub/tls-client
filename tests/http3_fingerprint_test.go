@@ -5,9 +5,9 @@ import (
 	"io"
 	"testing"
 
-	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	tls_client "github.com/Berserk-Automation-Hub/tls-client"
+	"github.com/Berserk-Automation-Hub/tls-client/profiles"
 )
 
 type BrowserLeaksResponse struct {

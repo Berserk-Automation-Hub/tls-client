@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/websocket"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/websocket"
 )
 
 type Websocket struct {

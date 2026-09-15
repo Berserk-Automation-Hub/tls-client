@@ -3,8 +3,8 @@ package tests
 import (
 	"testing"
 
-	"github.com/bogdanfinn/tls-client/profiles"
-	tls "github.com/bogdanfinn/utls"
+	"github.com/Berserk-Automation-Hub/tls-client/profiles"
+	tls "github.com/Berserk-Automation-Hub/utls"
 )
 
 // greaseSignatureSchemeProfiles are the profiles that send a GREASE value as

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/quic-go-utls/http3"
-	"github.com/bogdanfinn/tls-client/profiles"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/http3"
+	"github.com/Berserk-Automation-Hub/tls-client/profiles"
 )
 
 // --- parseSOCKS5ProxyURL tests ---

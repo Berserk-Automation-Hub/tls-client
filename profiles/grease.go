@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 )
 
 // randomGREASESignatureScheme returns a random GREASE value for the
@@ -23,7 +23,7 @@ import (
 // https://github.com/google/boringssl/blob/master/ssl/handshake_client.cc
 //
 // This function is a workaround. The proper fix belongs upstream in utls
-// (currently github.com/bogdanfinn/utls v1.7.7-barnius) and needs three
+// (currently github.com/Berserk-Automation-Hub/utls v1.7.7-barnius) and needs three
 // changes:
 //
 //  1. In u_tls_extensions.go, add a GREASE index for signature algorithms to
