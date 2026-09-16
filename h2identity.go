@@ -20,14 +20,15 @@ import (
 // Keeping the identity in one value means the two paths cannot drift again: a field added here
 // reaches both, and a field added to only one Transport literal is visible as an asymmetry.
 type h2Identity struct {
-	settings          map[http2.SettingID]uint32
-	settingsOrder     []http2.SettingID
-	priorities        []http2.Priority
-	headerPriority    *http2.PriorityParam
-	pseudoHeaderOrder []string
-	connectionFlow    uint32
-	initialStreamID   uint32
-	indexingPolicy    func(hpack.HeaderField) bool
+	settings            map[http2.SettingID]uint32
+	settingsOrder       []http2.SettingID
+	priorities          []http2.Priority
+	headerPriority      *http2.PriorityParam
+	pseudoHeaderOrder   []string
+	connectionFlow      uint32
+	initialStreamID     uint32
+	indexingPolicy      func(hpack.HeaderField) bool
+	staticNameLastMatch bool
 }
 
 func newH2Identity(p profiles.ClientProfile, to *TransportOptions) *h2Identity {
@@ -42,6 +43,7 @@ func newH2Identity(p profiles.ClientProfile, to *TransportOptions) *h2Identity {
 	}
 	if to != nil {
 		id.indexingPolicy = to.HPACKIndexingPolicy
+		id.staticNameLastMatch = to.HPACKStaticNameLastMatch
 	}
 	return id
 }
@@ -69,6 +71,7 @@ func (id *h2Identity) apply(t *http2.Transport) {
 	t.InitialStreamID = id.initialStreamID
 	t.Priorities = id.priorities
 	t.HPACKIndexingPolicy = id.indexingPolicy
+	t.HPACKStaticNameLastMatch = id.staticNameLastMatch
 
 	// SERVER PUSH: accept one only if this identity ADVERTISES that it will.
 	//

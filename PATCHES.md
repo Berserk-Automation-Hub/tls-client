@@ -330,6 +330,38 @@ the ClientHello sent to the https:// proxy carries NO GREASE ... the proxy leg i
 with crypto/tls while the origin leg uses the browser identity
 ```
 
+## Patch 6 — `TransportOptions.HPACKStaticNameLastMatch`
+
+Patch 1 made WHICH REPRESENTATION the HPACK encoder chooses a caller decision. This makes WHICH
+STATIC ENTRY a duplicated header NAME resolves to a caller decision too — the other half of the same
+encoder signature, and the half that made a second engine unshippable.
+
+RFC 7541 Appendix A gives `:method`, `:path`, `:scheme` and `:status` more than one static entry. An
+encoder that spells a field out but cites its name by index emits whichever it resolved to. Invisible
+for a name+value hit; **one byte on the wire** for everything else:
+
+| engine | policy | `:path` first octet | evidence |
+|---|---|---|---|
+| Chrome 153 | first match | `0x44` (name index 4) | 114 `:path` + 8 `:method`, two captures, zero exceptions |
+| Firefox 156 | last match | `0x45` (name index 5) | 41 of 41 attributed HEADERS blocks, confirmed by tshark |
+
+`fhttp` carried Chrome's answer as a constant (`v0.6.9-sightglass.8` makes it a parameter). This
+module threads it: `TransportOptions.HPACKStaticNameLastMatch` -> `h2Identity.staticNameLastMatch` ->
+`http2.Transport.HPACKStaticNameLastMatch`, the same three-step path `HPACKIndexingPolicy` already
+takes, so it lands on the FIRST connection rather than after one has been built.
+
+### Tests
+
+`hpack_static_name_index_test.go` reuses patch 1's loopback h2 server and reads the first octet of
+the `:path` field out of the real HEADERS frame: `0x44` with the option false, `0x45` with it true.
+
+Ablation, dropping the one line in `apply`:
+
+```
+with HPACKStaticNameLastMatch=true, :path first octet = 0x44, want 0x45;
+TransportOptions.HPACKStaticNameLastMatch is not reaching hpack.Encoder
+```
+
 ## Maintenance
 
 Re-tagging `utls`, `fhttp`, `quic-go-utls` or `websocket` means bumping the matching `require` line

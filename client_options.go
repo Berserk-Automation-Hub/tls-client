@@ -56,6 +56,17 @@ type TransportOptions struct {
 	// table), so the field is additive: a client that never sets it is byte-identical to one built
 	// before the field existed.
 	HPACKIndexingPolicy func(hpack.HeaderField) bool
+
+	// HPACKStaticNameLastMatch selects WHICH static-table entry a duplicated header NAME resolves
+	// to when the HTTP/2 encoder emits a literal with an indexed name. RFC 7541 Appendix A gives
+	// :method, :path, :scheme and :status more than one entry each, so the choice is on the wire —
+	// one byte per occurrence — and it differs by engine:
+	//
+	//	false (default)  first match  :path 4, :method 2   Chrome 153
+	//	true             last  match  :path 5, :method 3   Firefox 156, and fhttp upstream
+	//
+	// It is a per-profile wire signature, so it belongs here rather than as a constant in fhttp.
+	HPACKStaticNameLastMatch bool
 }
 
 type (
