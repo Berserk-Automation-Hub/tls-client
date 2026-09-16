@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	http "github.com/Berserk-Automation-Hub/fhttp"
+	utls "github.com/Berserk-Automation-Hub/utls"
 	_ "github.com/bdandy/go-socks4" // due to that proxy.FromURL() does support socks4
 	"golang.org/x/net/proxy"
 	"io"
@@ -119,6 +121,24 @@ type connectDialer struct {
 type proxyTLSVerify struct {
 	insecureSkipVerify bool
 	rootCAs            *x509.CertPool
+
+	// helloID is the ClientHello identity to present TO THE PROXY.
+	//
+	// This dial used crypto/tls, so an https:// proxy saw a Go standard-library ClientHello — a
+	// different TLS identity from the one the same client puts on its origin connection, and one no
+	// browser produces. The proxy operator sees it before any CONNECT line, on every tunnel. That is
+	// the same defect as patch 2 one layer down: patch 2 gave the proxy the profile's HTTP/2, and
+	// this gives it the profile's TLS.
+	//
+	// A zero value means "no identity supplied" and keeps the crypto/tls path, which is what a
+	// caller-supplied ProxyDialerFactory gets.
+	helloID utls.ClientHelloID
+	// randomExtOrder mirrors the origin connection's extension-order policy, so the two legs agree
+	// about whether this TLS stack permutes its extensions. One identity emitting a shuffled hello
+	// to the origin and a fixed one to the proxy contradicts itself.
+	randomExtOrder bool
+	forceHTTP1     bool
+	disableHTTP3   bool
 }
 
 // newConnectDialer creates a dialer to issue CONNECT requests and tunnel traffic via HTTP/S proxy.
@@ -343,7 +363,29 @@ func (c *connectDialer) DialContext(ctx context.Context, network, address string
 			if err != nil {
 				return nil, err
 			}
+		} else if c.tlsVerify.helloID.Client != "" {
+			// The profile's OWN ClientHello, to the proxy. See proxyTLSVerify.helloID.
+			tcpConn, derr := c.Dialer.DialContext(ctx, network, c.ProxyUrl.Host)
+			if derr != nil {
+				return nil, derr
+			}
+			uconf := &utls.Config{
+				NextProtos:         []string{"h2", "http/1.1"},
+				ServerName:         c.ProxyUrl.Hostname(),
+				InsecureSkipVerify: c.tlsVerify.insecureSkipVerify,
+				RootCAs:            c.tlsVerify.rootCAs,
+				OmitEmptyPsk:       true,
+			}
+			uconn := utls.UClient(tcpConn, uconf, c.tlsVerify.helloID,
+				c.tlsVerify.randomExtOrder, c.tlsVerify.forceHTTP1, c.tlsVerify.disableHTTP3)
+			if herr := uconn.HandshakeContext(ctx); herr != nil {
+				_ = tcpConn.Close()
+				return nil, herr
+			}
+			negotiatedProtocol = uconn.ConnectionState().NegotiatedProtocol
+			rawConn = uconn
 		} else {
+			// No identity supplied (a caller-supplied ProxyDialerFactory): the historical path.
 			tlsConf := tls.Config{
 				NextProtos:         []string{"h2", "http/1.1"},
 				ServerName:         c.ProxyUrl.Hostname(),

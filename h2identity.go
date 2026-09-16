@@ -46,6 +46,18 @@ func newH2Identity(p profiles.ClientProfile, to *TransportOptions) *h2Identity {
 	return id
 }
 
+// enablesPush reports whether this identity's SETTINGS advertise SETTINGS_ENABLE_PUSH=1.
+//
+// Absent is NOT the same as 1. RFC 9113 6.5.2 gives ENABLE_PUSH a default of 1, but a client that
+// omits the setting while carrying a browser's identity is a client whose SETTINGS frame does not
+// match the browser it claims to be -- and every browser profile states the setting explicitly.
+// Treating "absent" as "enabled" would restore the old behaviour for exactly the profiles that
+// forgot to say, which is the wrong way round.
+func (id *h2Identity) enablesPush() bool {
+	v, ok := id.settings[http2.SettingEnablePush]
+	return ok && v == 1
+}
+
 // apply writes the identity onto a Transport, leaving every per-path field alone. It never reads
 // from t, so applying the same identity to two Transports produces two identical wire identities.
 func (id *h2Identity) apply(t *http2.Transport) {
@@ -57,7 +69,31 @@ func (id *h2Identity) apply(t *http2.Transport) {
 	t.InitialStreamID = id.initialStreamID
 	t.Priorities = id.priorities
 	t.HPACKIndexingPolicy = id.indexingPolicy
-	t.PushHandler = &http2.DefaultPushHandler{}
+
+	// SERVER PUSH: accept one only if this identity ADVERTISES that it will.
+	//
+	// This was unconditional, which made the client contradict its own SETTINGS frame. A profile
+	// that sends SETTINGS_ENABLE_PUSH=0 -- which every current browser profile does, because no
+	// current browser accepts push -- told the peer "do not push" and then accepted a PUSH_PROMISE
+	// anyway: allocating a stream, spawning a goroutine and reading the pushed response body.
+	//
+	// Two costs. A hostile or misconfigured origin can make the client allocate streams and
+	// goroutines it advertised it would not accept, unbounded and driven entirely from the far end.
+	// And it is a behavioural fingerprint: ONE PUSH_PROMISE distinguishes this client from the
+	// browser it claims to be, because a browser that advertises ENABLE_PUSH=0 treats a push as a
+	// PROTOCOL_ERROR and closes the connection.
+	//
+	// fhttp already implements exactly that with a nil handler -- readLoop returns
+	// ConnectionError(ErrCodeProtocol), and its own comment there reads "should not be receiving
+	// PUSH_PROMISE if ENABLE_PUSH is disabled" -- so the correct behaviour is reached by NOT
+	// overriding it, and the override is what had to go.
+	//
+	// An identity with no settings at all keeps a handler, so a profile-less caller behaves as it
+	// always has; that path advertises no SETTINGS frame of its own and therefore contradicts
+	// nothing.
+	if id.settings == nil || id.enablesPush() {
+		t.PushHandler = &http2.DefaultPushHandler{}
+	}
 
 	// A nil order means "send none"; a nil slice would make fhttp fall back to its own, which is a
 	// different pseudo-header order on the wire.
@@ -95,6 +131,15 @@ func newProxyTLSVerify(config *httpClientConfig) proxyTLSVerify {
 	v := proxyTLSVerify{insecureSkipVerify: config.insecureSkipVerify}
 	if config.transportOptions != nil {
 		v.rootCAs = config.transportOptions.RootCAs
+	}
+	// The ClientHello identity for the PROXY leg is the same one the origin leg uses. Without it an
+	// https:// proxy sees a Go standard-library hello from a client whose origin traffic is a
+	// browser -- two TLS identities from one session, the proxy operator's one before any CONNECT.
+	if config.clientProfile.GetClientHelloId().Client != "" {
+		v.helloID = config.clientProfile.GetClientHelloId()
+		v.randomExtOrder = config.withRandomTlsExtensionOrder
+		v.forceHTTP1 = config.forceHttp1
+		v.disableHTTP3 = config.disableHttp3
 	}
 	return v
 }

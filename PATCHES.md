@@ -242,6 +242,94 @@ self-signed loopback proxy. Ablated by deleting the two `tls.Config` lines, it r
 `remote error: tls: bad certificate` with the diagnosis attached, which is the failure a caller would
 have hit.
 
+## Patch 4 — server push follows the SETTINGS frame the identity advertises
+
+`h2identity.go`.
+
+`apply` set `t.PushHandler = &http2.DefaultPushHandler{}` **unconditionally**, so a client whose
+profile sends `SETTINGS_ENABLE_PUSH=0` — which every current browser profile does, because no
+current browser accepts push — told the peer *"do not push"* and then accepted a `PUSH_PROMISE`
+anyway: allocating a stream, spawning a goroutine and reading the pushed response body.
+
+Two costs, and they are different in kind.
+
+**Resource.** A hostile or misconfigured origin can make the client allocate streams and goroutines
+it advertised it would not accept, unbounded, driven entirely from the far end.
+
+**Fingerprint.** It is a cross-layer contradiction: the wire says push is disabled and the
+implementation accepts it. **One** `PUSH_PROMISE` distinguishes this client from the browser it
+claims to be, because a browser advertising `ENABLE_PUSH=0` treats a push as a `PROTOCOL_ERROR` and
+closes the connection.
+
+**The fix is to stop overriding, not to add anything.** fhttp already implements exactly the right
+behaviour for a nil handler — `readLoop` returns `ConnectionError(ErrCodeProtocol)`, and its own
+comment there reads *"should not be receiving PUSH_PROMISE if ENABLE_PUSH is disabled"*. The
+override was what prevented it.
+
+```go
+if id.settings == nil || id.enablesPush() {
+    t.PushHandler = &http2.DefaultPushHandler{}
+}
+```
+
+**Absent is not the same as 1.** RFC 9113 §6.5.2 gives `ENABLE_PUSH` a default of 1, but a profile
+carrying a browser's identity while omitting the setting is already not that browser, and every
+browser profile states it explicitly. Treating absent as enabled would restore the old behaviour for
+exactly the profiles that forgot to say, which is the wrong way round.
+
+**An identity with no settings at all keeps its handler**, so a profile-less caller behaves as it
+always has: that path advertises no `SETTINGS` frame of its own and therefore contradicts nothing.
+
+Guard: `enable_push_test.go` — four identities (`ENABLE_PUSH=0`, `=1`, absent, no settings) plus a
+nil-identity inertness case. Ablation, restoring the unconditional assignment:
+
+```
+--- FAIL: TestEnablePushFollowsTheAdvertisedSettings/browser_profile:_ENABLE_PUSH=0
+        PushHandler != nil = true, want false.
+--- FAIL: TestEnablePushFollowsTheAdvertisedSettings/setting_absent
+```
+
+## Patch 5 — the https:// proxy sees the profile's ClientHello, not Go's
+
+`connect.go`, `h2identity.go`.
+
+The TLS dial to an `https://` proxy used **`crypto/tls`**, so a client carrying a browser profile put
+a browser's ClientHello on its ORIGIN connection and a **Go standard-library** one on its connection
+to the PROXY. Two TLS identities from one session, and the proxy operator sees the one that is not a
+browser — before any CONNECT line, on every tunnel.
+
+This is patch 2 one layer down. Patch 2 gave the proxy the profile's HTTP/2; this gives it the
+profile's TLS.
+
+Measured by a loopback proxy that reads the first TLS record and never answers (the hello is on the
+wire before a server says anything, so the handshake does not need to complete):
+
+```
+profile's hello   ciphers=16(grease 1)  extensions=17(grease 2)  session_id_len=32
+crypto/tls        ciphers=13(grease 0)  extensions=11(grease 0)  session_id_len=32
+```
+
+The dial now uses `utls.UClient` with the client's own `ClientHelloID`, and carries the origin leg's
+extension-order policy with it — one identity emitting a shuffled hello to the origin and a fixed one
+to the proxy would contradict itself.
+
+**A zero ClientHelloID keeps the `crypto/tls` path**, which is what a caller-supplied
+`ProxyDialerFactory` gets: that dialer is the caller's, not ours.
+
+**Client certificates for the proxy leg are still unplumbed** (HR-7, unchanged from patch 3):
+`TransportOptions.Certificates` is utls's own type and this dial now has a utls path, so the
+conversion is no longer type-blocked — but no ground truth exists here for what a browser does with
+a client certificate on a proxy leg, and inventing it would be worse than recording it.
+
+Guard: `proxy_clienthello_test.go`. It asserts GREASE presence rather than a cipher count, so a
+profile change cannot invalidate it. Ablation, dropping the identity:
+
+```
+hello to the proxy: ciphers=13(grease 0) extensions=11(grease 0)
+the ClientHello sent to the https:// proxy carries NO GREASE ... the proxy leg is dialling
+with crypto/tls while the origin leg uses the browser identity
+```
+
 ## Maintenance
 
 Re-tagging `utls`, `fhttp`, `quic-go-utls` or `websocket` means bumping the matching `require` line
