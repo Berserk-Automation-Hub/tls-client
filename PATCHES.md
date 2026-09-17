@@ -53,15 +53,16 @@ so this fork is not behind.
 
 Mechanically derived from `git diff --name-status <base>..HEAD`, not written from memory, and
 CHECKED — `patches_doc_test.go` recomputes the diff and fails if this section does not match it.
-**60 files in total: 10 added, 50 modified.** The 50 are 48 `.go` files plus `go.mod` and
+**61 files in total: 11 added, 50 modified.** The 50 are 48 `.go` files plus `go.mod` and
 `go.sum`.
 
-### Added — 10 files
+### Added — 11 files
 
 | file | what it is |
 |---|---|
 | `PATCHES.md` | this document |
 | `h2identity.go` | patches 2, 3, 4, 5 — the HTTP/2 wire identity and the proxy leg's TLS identity |
+| `h2identity_apply_test.go` | the per-assignment guard on `h2Identity.apply` (patches 2, 4, 6) |
 | `enable_push_test.go` | guard for patch 4 |
 | `h2_proxy_tunnel_identity_test.go` | guards for patches 2 and 3 |
 | `hpack_indexing_policy_test.go` | guard for patch 1 |
@@ -155,7 +156,10 @@ re-gofmt'd because the longer path changed one import block's sort order.
 
 ## Verification — a REGRESSION DIFF, not a green-suite claim
 
-Run on 2026-09-17, `go test ./... -count=1` in both trees, Go 1.27.0, darwin/arm64:
+Re-run for `v1.16.0-sightglass.12` on 2026-09-17, `go test ./... -count=1 -v` in both trees, Go
+1.27.0, darwin/arm64. The pristine tree is a fresh `git clone --branch v1.16.0` of
+`github.com/bogdanfinn/tls-client`, checked out at the same `23b44420627619a30d09be5b6250e6cf2e350cf2`
+this document names as the base:
 
 | | pristine `v1.16.0` | this fork |
 |---|---|---|
@@ -164,12 +168,26 @@ Run on 2026-09-17, `go test ./... -count=1` in both trees, Go 1.27.0, darwin/arm
 | `github.com/.../tls-client/tests` | FAIL — 1 test | FAIL — 1 test |
 
 ```
-pristine: --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome
-fork:     --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome
+                         pristine   fork
+=== RUN  (incl. subtests)     113    113
+--- PASS (top level)           74     74
+--- SKIP                        4      4   (the four TestSocks5Proxy_* — no SOCKS5 server here)
+--- FAIL                        1      1
+
+pristine: --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome (0.22s)
+fork:     --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome (0.28s)
 
 NEW FAILURES IN THIS FORK: none
 FAILURES FIXED BY THIS FORK: none
 ```
+
+Recorded rather than hidden: an earlier non-verbose run of the PRISTINE tree on the same day aborted
+the whole `tests/` package with `panic: dialTLS returned no error when determining cachedTransports`
+(`roundtripper.go:363`, reached from `RoundTrip` at `:326`). It did not reproduce on the verbose
+re-run tabulated above, it is upstream code this fork does not touch, and it is a PRISTINE-tree
+observation, so it is neither a regression of this fork's nor something this fork can fix without
+patching upstream's transport cache. It is noted so the next person who sees it knows it has been
+seen.
 
 `gofmt -l .` prints exactly one file in **both** trees — `profiles/contributed_browser_profiles.go`,
 an upstream file this fork does not touch — so the gofmt baseline is identical to upstream's.
@@ -198,15 +216,29 @@ after patches 7 and 8:                  47.0% of statements
 after the patch-7 loser-cancel, the
   secure direction of patch 3 and the
   two new documentation guards:         48.9% of statements
+after the per-assignment apply guard,
+  the six-field proxyTLSVerify
+  projection, the proxy-leg ALPN and
+  extension-order wire guards and the
+  three h3-completion guards:           49.8% of statements
 ```
 
 Every function this fork adds is covered by this fork's own tests, not only by the consumer:
 
 ```
 h2identity.go   newH2Identity 100.0%  enablesPush 100.0%  apply 100.0%  newProxyTLSVerify 100.0%
-racer.go        raceContext   100.0%  raceAttempt 100.0%  startRace 93.8%  waitForRaceWinner 87.5%
-roundtripper.go completeHTTP3SettingsOrder 96.7%   buildHTTP3Transport 76.5%
+racer.go        raceContext   100.0%  raceAttempt 100.0%  startRace 100.0%  waitForRaceWinner 87.5%
+                attemptHTTP2  100.0%  attemptHTTP3 87.5%
+roundtripper.go completeHTTP3SettingsOrder 100.0%   buildHTTP3Transport 91.2%
 ```
+
+**A percentage is not a guard, and this fork has already been caught by that.** At
+`v1.16.0-sightglass.11` `newProxyTLSVerify` read **100.0%** and `h2Identity.apply` read **100.0%**
+in this same profile, and nine of the statements inside them could be neutered ONE AT A TIME with
+the whole suite green: the statements EXECUTED, and nothing asserted the values they produced. The
+figures above are reported because they are asked for, and the thing that is actually load-bearing
+is the ablation table in each patch section — every element in this fork has now been reverted on
+its own, at `v1.16.0-sightglass.12`, and the failure text it produced is recorded beside it.
 
 ## Pre-existing upstream failure (HR-7 — recorded, not ours), with its root cause
 
@@ -344,26 +376,117 @@ is what a caller-supplied `ProxyDialerFactory` gets — that dialer is the calle
 
 ### Tests
 
-`h2_proxy_tunnel_identity_test.go`, two halves, because the failure modes are different:
+THREE layers, because the failure modes are different — and because two of them were not enough.
 
+- `h2identity_apply_test.go` — `TestH2IdentityApplyWritesEveryFieldOntoTheTransport`, the
+  PER-ASSIGNMENT guard, one subtest per field `apply` writes. This layer did not exist until
+  `v1.16.0-sightglass.12` and its absence is why four identity-bearing assignments could be deleted
+  ONE AT A TIME with `go test . -count=1` still at `ok`. The reason is not that nobody looked: it is
+  that the only tests that observed those fields were WIRE tests driven by a CHROME profile, and
+  **fhttp's defaults are Chrome's values**.
+
+  | assignment | why a Chrome wire test cannot see it go |
+  |---|---|
+  | `t.ConnectionFlow` | fhttp's `transportDefaultConnFlow` is **literally 15663105** (`http2/transport.go:44`, substituted at `:875` when the field is 0), which is what every Chrome profile declares. With the assignment ablated the wire test still LOGGED `WINDOW_UPDATE 15663105` and PASSED. |
+  | `t.HeaderPriority` | with the field nil fhttp embeds its own `{Exclusive:true, Weight:255, StreamDep:0}` (`http2/transport.go:1543`), and every Chrome profile declares no header priority, so the frame is byte-identical. |
+  | `t.InitialStreamID` | fhttp honours it only when non-zero (`http2/transport.go:939`); **all 83** in-tree profiles declare 0. |
+  | `t.Priorities` | every Chrome profile declares none. |
+
+  The sentinel values in this file are deliberately no browser's and not fhttp's: the file asserts
+  that `apply` COPIES what it is handed, and the wire tests assert that what it is handed is the
+  profile's. It also guards `apply`'s own doc claim — that it never READS from the Transport — by
+  applying one identity to a clean Transport and to a pre-populated one and requiring the two wire
+  identities to be equal. That claim is what makes ONE `h2Identity` enough for BOTH paths.
 - `TestH2ProxyTunnelCarriesTheClientsHTTP2Identity` — the WIRING. White-box on purpose: it asserts
   the dialer `client.go` builds carries the profile's SETTINGS order, connection flow and indexing
   policy. Those two `newConnectDialer` call sites are exactly what an upstream merge drops silently.
+  It asserts the `h2Identity` STRUCT, one layer above the field that reaches the wire, which is why
+  the per-assignment layer above is needed as well as this one and not instead of it.
 - `TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity` — the WIRE, through the SHIPPED public API
   (`NewHttpClient` + `WithProxyUrl("https://…")`, reachable because of patch 3). A loopback proxy
-  negotiates h2, answers the CONNECT with `:status 200` and holds the tunnel open; the test reads the
-  client's SETTINGS frame, its stream-0 WINDOW_UPDATE, its HEADERS-embedded PRIORITY and the first
-  octet of `:method` off the socket. Every assertion is against the PROFILE, so it fails on drift
-  rather than agreeing with a copy of today's output.
+  negotiates h2, answers the CONNECT with `:status 200` on **the stream the client actually opened**
+  and holds the tunnel open; the test reads the client's SETTINGS frame, its stream-0 WINDOW_UPDATE,
+  its PRIORITY frames, the CONNECT stream id, its HEADERS-embedded PRIORITY and the first octet of
+  `:method` off the socket.
 
-Ablated, one each:
+  It is a table over **three** profiles, and that is the correction of a sentence this document used
+  to carry. It said *"Every assertion is against the PROFILE, so it fails on drift rather than
+  agreeing with a copy of today's output."* The first half was true and the second half did not
+  follow: every assertion **was** against the profile, and the profile agreed with fhttp, so four of
+  them could not fail. The three profiles are chosen so that each field has at least one case in
+  which the profile and fhttp disagree:
+
+  ```
+  chrome_133   SETTINGS set and order, HPACK indexing policy, pseudo-header order
+  firefox_102  connectionFlow 12517377 (fhttp: 15663105), headerPriority {dep 13, !exclusive, w 41}
+               (fhttp: {dep 0, exclusive, w 255}), and a 6-entry PRIORITY tree (fhttp: none)
+  a CUSTOM profile   initialStreamID 7 — the shape cffi_src/factory.go builds from a caller's JSON,
+               and the only way to move a field all 83 in-tree profiles declare as 0. It carries
+               Chrome_133's real hello and settings because it has to reach the proxy at all; it
+               claims to be no browser (HR-1) and asserts plumbing.
+  ```
+
+Ablated, one element at a time, against `v1.16.0-sightglass.12`:
 
 ```
-tunnel back to http2.Transport{}      "the tunnel sent SETTINGS [ENABLE_PUSH]; the profile's order
-                                       is [HEADER_TABLE_SIZE ENABLE_PUSH INITIAL_WINDOW_SIZE
-                                       MAX_HEADER_LIST_SIZE]"
-client.go passes nil                  "the proxy dialer carries no HTTP/2 identity"
+tunnel back to http2.Transport{}   the tunnel sent SETTINGS [ENABLE_PUSH]; the profile's order is
+(connect.go drops c.h2.apply)      [HEADER_TABLE_SIZE ENABLE_PUSH INITIAL_WINDOW_SIZE
+                                   MAX_HEADER_LIST_SIZE]. A zero-value http2.Transport sends fhttp's
+                                   own four in Go map order, which is both a different SET and a
+                                   RANDOM order
+client.go passes nil               the proxy dialer carries no HTTP/2 identity: its tunnel would
+                                   build a zero-value http2.Transport and speak fhttp's defaults to
+                                   the proxy while the origin speaks the profile
+roundtripper.go drops rt.h2.apply  with a policy that refuses :path, its first octet = 0x44, want
+                                   0x04 ...; TransportOptions.HPACKIndexingPolicy is not reaching
+                                   hpack.Encoder
+t.ConnectionFlow dropped           [firefox_102] the tunnel's stream-0 WINDOW_UPDATE delta is
+                                   15663105; the profile says 12517377. fhttp's own default is
+                                   15663105, so this is the tunnel speaking fhttp's identity rather
+                                   than the profile's
+                                   [apply] apply left http2.Transport.ConnectionFlow = 1, the
+                                   identity says 11259375 ...
+t.HeaderPriority dropped           [firefox_102] the tunnel's embedded PRIORITY is dep=0
+                                   exclusive=true weight=255; the profile says dep=13
+                                   exclusive=false weight=41. fhttp's own default is dep=0
+                                   exclusive=true weight=255, which is what a Transport with no
+                                   HeaderPriority emits
+t.InitialStreamID dropped          [custom profile] the tunnel opened the CONNECT on stream 1; this
+                                   profile's identity puts it on 7. fhttp seeds nextStreamID from
+                                   Transport.InitialStreamID only when it is non-zero ...
+t.Priorities dropped               [firefox_102] the tunnel opened with 0 PRIORITY frames; the
+                                   profile declares 6 ([... StreamID:3 ... StreamID:13]). fhttp
+                                   writes one per entry immediately after SETTINGS ...
+t.PseudoHeaderOrder dropped        the tunnel's CONNECT carried pseudo-headers [:authority :method];
+                                   RFC 9113 §8.5 leaves exactly [:method :authority]
+t.Settings/SettingsOrder dropped   the tunnel sent SETTINGS [ENABLE_PUSH]; the profile's order is
+                                   [HEADER_TABLE_SIZE INITIAL_WINDOW_SIZE MAX_FRAME_SIZE]
+t.HPACKStaticNameLastMatch dropped apply left http2.Transport.HPACKStaticNameLastMatch = false, the
+                                   identity says true ...
+apply reads from t (keeps an       the same identity produced two DIFFERENT wire identities: a
+already-set ConnectionFlow)        zero-value Transport became {flow:11259375 ...} and a
+                                   pre-populated one became {flow:1 ...}. apply reads from t
+                                   somewhere, so the origin connection and the proxy tunnel no
+                                   longer speak the same HTTP/2
 ```
+
+### One element was DELETED rather than guarded
+
+`apply` also carried a nil-normalising branch:
+
+```go
+// A nil order means "send none"; a nil slice would make fhttp fall back to its own, which is a
+// different pseudo-header order on the wire.
+if id.pseudoHeaderOrder == nil { t.PseudoHeaderOrder = []string{} } else { ... }
+```
+
+The comment was wrong. fhttp's `encodeHeaders` reads
+`pHeaderOrder = cc.t.PseudoHeaderOrder; ok = len(pHeaderOrder) > 0` (`http2/transport.go:1882`), so
+`nil` and `[]string{}` take the SAME branch and put the SAME bytes on the wire, and nothing else in
+either module reads the field. No test could redden it because it changed nothing. It is deleted in
+`v1.16.0-sightglass.12`; `TestH2IdentityApplyPassesAnEmptyPseudoHeaderOrderThrough` pins the
+equivalence that justified deleting it, so a future fhttp that DOES distinguish the two reddens here
+rather than silently changing the wire.
 
 ### What patch 2 does NOT claim (HR-7)
 
@@ -416,11 +539,63 @@ certificate from any `https://` proxy for every caller of this library, left the
 projection that is right and a dial that ignores it are different failures:
 
 - the projection — `newProxyTLSVerify` over both answers, asserting the proxy leg gets exactly what
-  the caller said;
+  the caller said. **All six fields**, both ways: `insecureSkipVerify`, `rootCAs`, `helloID`,
+  `randomExtOrder`, `forceHTTP1`, `disableHTTP3`. Until `v1.16.0-sightglass.12` this subtest asserted
+  `.insecureSkipVerify` alone, so `v.rootCAs = config.transportOptions.RootCAs` could be replaced by
+  `nil` and each of the other three by `false` with the whole suite green — although `rootCAs` is
+  named in this very section as half of what the patch adds, and the other three are the ALPN list
+  and the extension order the PROXY sees. A seventh case covers the zero-`ClientHelloID` config: the
+  three hello-shaping answers must NOT be projected there, because that config takes connect.go's
+  `crypto/tls` path and there is no utls connection to put them on;
 - the wire — the SHIPPED `NewHttpClient` with **no** `WithInsecureSkipVerify()`, against the same
   self-signed loopback proxy the insecure test uses. The proxy answers the CONNECT with 200, so a
   client that got through is visible as an observation; the test requires none, and requires the
   error to be a certificate rejection rather than any other failure.
+- the wire, the other way — `RootCAs` is the one verification answer that cannot be faked by turning
+  verification OFF, so a second wire subtest puts the loopback proxy's own self-signed certificate in
+  the caller's `TransportOptions.RootCAs`, passes **no** `WithInsecureSkipVerify()`, and requires the
+  CONNECT to arrive. Ablated (`v.rootCAs = nil`) it reports: *"the caller put the proxy's certificate
+  in TransportOptions.RootCAs and the tunnel never reached CONNECT (Do returned ... x509: certificate
+  signed by unknown authority)"*.
+
+The three hello-shaping answers are guarded on the WIRE too, in `proxy_clienthello_test.go`, because
+what they change is the hello the proxy reads —
+`TestProxyHelloCarriesTheCallersHelloShapingOptions`, every case driving `NewHttpClient` +
+`WithProxyUrl("https://…")` at a proxy that records the first TLS record and never answers:
+
+```
+no options            ALPN to the proxy == the profile's own declaration, read from
+                      GetClientHelloSpec() rather than written here   -> [h3 h2 http/1.1]
+WithForceHttp1()      -> [http/1.1]                    (utls rewrites the ALPNExtension)
+WithDisableHttp3()    -> [h2 http/1.1]                 (utls removes "h3" from ALPN and ALPS)
+WithRandomTLSExtensionOrder()
+                      4 dials, 4 DISTINCT extension orders, against a 3-dial control that shows the
+                      order is otherwise fixed. GREASE ids are normalised first: their VALUES are
+                      redrawn per hello by design and their POSITIONS are deliberately not shuffled,
+                      so the order is the measurement and the ids are not.
+```
+
+Ablations, one field at a time in `newProxyTLSVerify`:
+
+```
+v.rootCAs = nil          the caller's TransportOptions.RootCAs is 0x… and the proxy leg gets 0x0.
+                         RootCAs is documented as a property of the CLIENT; a proxy leg that drops
+                         it verifies the proxy against the system roots instead of the caller's
+                         + the shipped-client RootCAs wire subtest, above
+v.randomExtOrder = false the caller set WithRandomTlsExtensionOrder and all four hellos to the PROXY
+                         carried the profile's FIXED extension order [2570 35 13 17613 51 18 11 43 5
+                         16 65037 27 10 45 23 65281 2570]
+v.forceHTTP1 = false     the caller set WithForceHttp1 and the hello to the PROXY still offers ALPN
+                         [h3 h2 http/1.1] (the profile declares [h3 h2 http/1.1])
+v.disableHTTP3 = false   the caller set WithDisableHttp3 and the hello to the PROXY offers ALPN
+                         [h3 h2 http/1.1]; with h3 removed the profile's becomes [h2 http/1.1]
+v.helloID dropped        the hello to the proxy offers ALPN [h2 http/1.1]; the profile declares
+                         [h3 h2 http/1.1]   +   ciphers=13(grease 0) extensions=11(grease 0): the
+                         ClientHello sent to the https:// proxy carries NO GREASE …
+connect.go drops the two the tunnel never completes: "proxy: read preface: remote error: tls: bad
+tls.Config lines         certificate (a certificate error here means the client's
+                         WithInsecureSkipVerify is not reaching the TLS dial to the PROXY …)"
+```
 
 And because this is the one patch in this fork that IS on Sightglass's shipped path —
 `newProxyTLSVerify` is 100.0% in `go test ./sightglass/... -coverpkg=.../tls-client`, against every
@@ -673,6 +848,34 @@ winner's child is deliberately left uncancelled and ends with its parent — the
 which is exactly the lifetime the response body has. When NOBODY wins there is no body to protect,
 so `startRace` releases both.
 
+### ONE release policy, because three statements were three chances to be wrong
+
+The first version of this patch released the attempts from three separate statements: `stopHTTP2()`
+on an h3 win, `stopHTTP3()` on an h2 win, and both again when nobody won. A statement that runs on
+only one of three outcomes is a statement no single test observes, and **deleting the nobody-won
+`stopHTTP3()` left the whole suite green** — which is how it was found. Worse, it is not fixable by
+adding a test at that layer: when the HTTP/3 attempt is still IN FLIGHT the only way
+`waitForRaceWinner` can return with no response is the caller's context expiring, and that cancels
+the attempt's child anyway, so the statement is unobservable from outside `startRace` by
+construction.
+
+The fix is structural rather than a new assertion. The two attempts live in one list with one policy:
+
+```go
+attempts := []raceAttemptHandle{{"h3", stopHTTP3}, {"h2", stopHTTP2}}
+stopAllExcept := func(keep string) {
+	for _, a := range attempts {
+		if a.protocol != keep { a.stop() }
+	}
+}
+...
+resp, err := pr.waitForRaceWinner(raceContext(req), addr, resultCh, stopAllExcept)
+if resp == nil { stopAllExcept("") }   // "" keeps nothing
+```
+
+Identical behaviour in all three outcomes, and every fact in it is now on a path some test already
+drives — see the four ablations below.
+
 ### Guards
 
 `race_timeout_test.go`, four of them, because the failure modes differ:
@@ -745,13 +948,40 @@ Ablation, cancelling BOTH on a win — the naive fix, and the reason the winner'
     cancellation, so this hands back a dead response
 ```
 
-Ablation, deleting the nobody-won cleanup:
+Ablation, deleting the nobody-won cleanup (`if resp == nil { stopAllExcept("") }`):
 
 ```
 --- FAIL: TestStartRaceStopsBothAttemptsWhenNobodyWins (0.30s)
-    no attempt won, yet the HTTP/2 attempt's derived context is still uncancelled after startRace
-    returned. Nothing depends on it — there is no response body — so it stays registered on the
-    caller's context for the rest of the request, once per race
+    race_timeout_test.go:310: no attempt won, yet the HTTP/2 attempt's derived context is still
+    uncancelled after startRace returned. Nothing depends on it — there is no response body — so it
+    stays registered on the caller's context for the rest of the request, once per race
+```
+
+Ablation, dropping the `"h3"` entry from the attempt list — the one that used to be green:
+
+```
+--- FAIL: TestStartRaceStopsTheLoserAndNotTheWinner (2.30s)
+    race_timeout_test.go:262: the HTTP/2 attempt won the race and the HTTP/3 attempt was still in
+    flight 2s later, against a UDP black hole at 127.0.0.1:52747. The loser is not being cancelled:
+    both attempts are running on a context the racer cannot reach, so the losing dial holds its
+    socket until QUIC's own handshake idle timeout
+```
+
+Ablation, dropping the `"h2"` entry from the attempt list:
+
+```
+--- FAIL: TestStartRaceStopsBothAttemptsWhenNobodyWins (0.30s)
+    race_timeout_test.go:310: no attempt won, yet the HTTP/2 attempt's derived context is still
+    uncancelled after startRace returned …
+```
+
+Ablation, `stopAllExcept` keeping nothing (`a.stop()` unconditionally) — the naive fix again:
+
+```
+--- FAIL: TestStartRaceStopsTheLoserAndNotTheWinner (0.30s)
+    race_timeout_test.go:252: the WINNER's request context is already cancelled (context canceled)
+    when startRace returns. The caller has not read the body yet and both transports abort the
+    stream on request-context cancellation, so this hands back a dead response
 ```
 
 ### Reachability (HR-7), measured
@@ -833,7 +1063,7 @@ profiles that declare no order at all, a random order becomes a fixed one.
 
 ### Guards
 
-`http3_settings_order_test.go`, three:
+`http3_settings_order_test.go`, four:
 
 - `TestHTTP3SettingsOrderNamesEverySettingEmitted` — COMPLETENESS, over every profile in
   `profiles.MappedTLSClients`, and also rejects a duplicate id (`Append` deletes as it writes, so a
@@ -844,6 +1074,18 @@ profiles that declare no order at all, a random order becomes a fixed one.
   RE-SORTS a declared one. Its first case uses a descending caller declaration (`h3SettingsOrder` is
   caller-supplied through `cffi_src/types.go`), because an already-ascending declaration cannot show
   the difference.
+- `TestHTTP3SettingsOrderCompletionIsAscendingAndGreaseLast` — added in `v1.16.0-sightglass.12`,
+  for the three decisions the other three could not see. "Stable" is not "right": the wire test asks
+  only that the order not MOVE, so flipping the tie-break to DESCENDING left every HTTP/3 subtest
+  green, because a stable wrong order is still stable. Nothing asserted that the random GREASE id
+  goes LAST rather than into numeric position, although its VALUE is redrawn per transport, so
+  sorting it by value would move a different id into a different slot on every process start — the
+  exact nondeterminism this patch removes. Nothing declared a duplicate id, so the dedup was green
+  when deleted. And nothing exercised `t3.MaxResponseHeaderBytes >= 0` for a profile that does not
+  already name `0x6`: only `chrome_144` and `chrome_144_PSK` have a positive
+  `MaxResponseHeaderBytes` in-tree and both declare `0x6` themselves, while a CALLER reaches it for
+  any profile through `TransportOptions.MaxResponseHeaderBytes` — including the 78 that declare no
+  order at all.
 
 Ablations, one per element:
 
@@ -862,6 +1104,34 @@ sort the DECLARED ids too
   SETTINGS order is [1 7 51]; the caller declared [7 1] and the declaration must be copied verbatim
   in front. Completing the order must only APPEND the ids the declaration could not name —
   re-sorting the declared ones replaces a measured SETTINGS order with this code's own tie-break
+
+flip the tie-break to DESCENDING (`rest[i] > rest[j]`)
+  the HTTP/3 SETTINGS order for a caller who declared none is [51 7 1]; completing an order appends
+  the ids the declaration could not name in ASCENDING numeric order, which is [1 7 51]. The
+  tie-break is arbitrary but it is not free: it is the only thing standing between this profile and
+  a Go map's iteration order, so it has to be ONE fixed rule that every build of every process
+  agrees on
+
+delete the declared-id dedup (`if _, dup := named[id]; dup { continue }`)
+  the caller declared [7 1 7] and the completed order is [7 1 7 51]: 0x7 is named twice.
+  quic-go-utls deletes an id as it writes it, so the repeat writes nothing and drops the id that
+  would have followed it out of the position the caller asked for
+
+delete the GREASE hold-back (`if hasGrease && id == greaseID { continue }`)
+  [chrome_144] AdditionalSettingsOrder names 0x2704dadc9f twice ([1 6 7 51 167585176735
+  167585176735]); settingsFrame.Append deletes an id once it is written, so the duplicate silently
+  drops whatever would otherwise have followed it
+
+delete the trailing GREASE append
+  [chrome_144] profile chrome_144: the HTTP/3 SETTINGS frame will carry [0x21dba9bf6f], and
+  AdditionalSettingsOrder ([1 6 7 51]) names none of them …
+
+delete `if t3.MaxResponseHeaderBytes >= 0 { emitted[0x6] = … }`
+  the HTTP/3 SETTINGS frame will carry 0x6 SETTINGS_MAX_FIELD_SECTION_SIZE because the caller set
+  MaxResponseHeaderBytes, and AdditionalSettingsOrder ([1 7 51]) does not name it
+
+delete `if t3.EnableDatagrams { emitted[0x33] = … }`
+  the HTTP/3 SETTINGS frame will carry [0x33], and AdditionalSettingsOrder names none of them …
 ```
 
 ### Reachability (HR-7), measured
@@ -871,4 +1141,4 @@ profile above, `roundtripper.go:210 buildHTTP3Transport` and `roundtripper.go:33
 completeHTTP3SettingsOrder` are both **0.0%** when the whole `sightglass` package suite drives
 `tls-client`. `buildClient` always passes `WithDisableHttp3()`, and Sightglass's own `quich3` builds
 its H3 SETTINGS from the profile document. This is a defect in this module's own HTTP/3 path, fixed
-and guarded where it lives; in this fork's own suite the two functions are 76.5% and 96.7%.
+and guarded where it lives; in this fork's own suite the two functions are 91.2% and 100.0%.
