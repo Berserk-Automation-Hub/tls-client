@@ -154,9 +154,29 @@ func (pr *protocolRacer) createTransportForProtocol(protocol, addr string, req *
 	return pr.cachedTransports[transportKey], nil
 }
 
+// raceContext is the context waitForRaceWinner waits on. It is the CALLER'S, and nothing else.
+//
+// It used to be context.WithTimeout(context.Background(), 10*time.Second): a literal, detached from
+// the request. That is wrong in both directions, and silently.
+//
+//   - A caller who asked for LESS than ten seconds did not get it. WithTimeoutSeconds(3) puts a
+//     3-second deadline on the request context (fhttp's Client.send -> setRequestCancel), both
+//     attempts return on it, and then waitForRaceWinner went on waiting on a context that does not
+//     expire until ten — so Do() returned at ten seconds for a client configured for three.
+//   - A caller who asked for MORE than ten seconds did not get it either: at ten seconds the race
+//     context fired and the request failed with "context deadline exceeded" while the caller's own
+//     deadline, and both in-flight attempts, still had time left.
+//
+// Deriving it from req.Context() makes the race end exactly when the caller said, because the
+// deadline WithTimeoutSeconds installs is already on that context. WithCancel rather than plain
+// req.Context() so the winner can still stop the loser the moment it wins.
+func raceContext(req *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithCancel(req.Context())
+}
+
 func (pr *protocolRacer) startRace(req *http.Request, addr string, getTransportFunc func(*http.Request, string) error) (*http.Response, error) {
 	resultCh := make(chan racingResult, 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := raceContext(req)
 	defer cancel()
 
 	go pr.attemptHTTP3(req, resultCh)
