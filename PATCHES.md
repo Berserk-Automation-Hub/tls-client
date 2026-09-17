@@ -1,58 +1,175 @@
 # Sightglass fork of `bogdanfinn/tls-client`
 
-**Three functional patches** (below); otherwise this fork exists for package-path identity, the same
-reason as the `websocket` fork.
+**Eight functional patches** (below). They are not cosmetic: five `.go` files in this module change
+behaviour, and two of those changes alter what goes on the wire for every request that uses them.
+The rest of the fork is package-path identity, the same reason as the `websocket` fork.
 
 Sightglass consumes patched forks of `utls`, `fhttp` and `quic-go-utls` by plain `require` with no
 `replace` directive, so each carries its own module path. `tls-client` imports all three (plus
 `websocket`, which imports two of them). Leaving tls-client on the upstream path would mean the
 binary contains **two** utls and **two** fhttp — different packages, different types — and it does
-not merely duplicate, it fails to compile:
+not merely duplicate, it fails to compile. Reproduced on 2026-09-17 by putting
+`github.com/bogdanfinn/fhttp v0.6.9` back in `go.mod` and reverting **`websocket_options.go`**'s
+import alone:
 
 ```
-websocket.go:55:22: cannot use config.cookieJar
-    (variable of interface type "github.com/Berserk-Automation-Hub/fhttp".CookieJar)
-    as "github.com/bogdanfinn/fhttp".CookieJar value in struct literal
+# github.com/Berserk-Automation-Hub/tls-client
+./websocket.go:55:22: cannot use config.cookieJar (variable of interface type
+    "github.com/bogdanfinn/fhttp".CookieJar) as "github.com/Berserk-Automation-Hub/fhttp".CookieJar
+    value in struct literal: "github.com/bogdanfinn/fhttp".CookieJar does not implement
+    "github.com/Berserk-Automation-Hub/fhttp".CookieJar (wrong type for method Cookies)
+        have Cookies(*url.URL) []*"github.com/bogdanfinn/fhttp".Cookie
+        want Cookies(*url.URL) []*"github.com/Berserk-Automation-Hub/fhttp".Cookie
+./websocket.go:75:55: cannot use w.config.headers (variable of map type
+    "github.com/bogdanfinn/fhttp".Header) as "github.com/Berserk-Automation-Hub/fhttp".Header value
+    in argument to w.dialer.DialContext
 ```
+
+The error is REPORTED at `websocket.go` but is PRODUCED by `websocket_options.go`, which is where
+the two fields' types are declared; reverting `websocket.go`'s own import instead compiles clean,
+because that file uses only the string constant `http.HeaderOrderKey`. An earlier revision of this
+document quoted the error with the two module paths the other way round and attributed it to
+`websocket.go`; both are corrected here.
 
 That is hard rule HR-2 — one TLS implementation, one HTTP implementation, one QUIC implementation in
 the build graph — enforced by the compiler rather than by convention.
 
-## The diff, in full
+## Upstream base
+
+**`v1.16.0`**, commit `23b44420627619a30d09be5b6250e6cf2e350cf2` ("Add disableSessionTickets and
+trustAnchorsPayload to the shared library payload"). Verified, not assumed:
+
+```
+$ git merge-base sightglass origin/master
+23b44420627619a30d09be5b6250e6cf2e350cf2
+$ git ls-remote --tags https://github.com/bogdanfinn/tls-client.git | grep 23b4442
+23b44420627619a30d09be5b6250e6cf2e350cf2	refs/tags/v1.16.0
+```
+
+`v1.16.0` is also the newest tag upstream publishes (`git ls-remote --tags ... | sort -V | tail -1`),
+so this fork is not behind.
+
+## The exact file inventory
+
+Mechanically derived from `git diff --name-status <base>..HEAD`, not written from memory. **57 files
+in total: 9 added, 48 modified.**
+
+### Added — 9 files
+
+| file | what it is |
+|---|---|
+| `PATCHES.md` | this document |
+| `h2identity.go` | patches 2, 3, 4, 5 — the HTTP/2 wire identity and the proxy leg's TLS identity |
+| `enable_push_test.go` | guard for patch 4 |
+| `h2_proxy_tunnel_identity_test.go` | guards for patches 2 and 3 |
+| `hpack_indexing_policy_test.go` | guard for patch 1 |
+| `hpack_static_name_index_test.go` | guard for patch 6 |
+| `proxy_clienthello_test.go` | guard for patch 5 |
+| `race_timeout_test.go` | guards for patch 7 |
+| `http3_settings_order_test.go` | guards for patch 8 |
+
+### Modified, and behaviour changes — 5 `.go` files
+
+| file | change |
+|---|---|
+| `client_options.go` | `TransportOptions.HPACKIndexingPolicy` and `.HPACKStaticNameLastMatch` (patches 1, 6) |
+| `roundtripper.go` | the origin Transport takes its identity from `h2Identity`; complete, deterministic HTTP/3 SETTINGS order (patches 2, 8) |
+| `connect.go` | `connectDialer` gains `h2 *h2Identity` and `tlsVerify proxyTLSVerify`; the tunnel Transport and the proxy TLS dial use them (patches 2, 3, 5) |
+| `client.go` | both `newConnectDialer` call sites pass `newH2Identity(...)` and `newProxyTLSVerify(...)` (patches 2, 3, 5) |
+| `racer.go` | the HTTP/3 race waits on the CALLER's context, not a ten-second literal (patch 7) |
+
+### Modified, import path only — 43 `.go` files, plus `go.mod` and `go.sum`
+
+Every remaining modified file changes on no line that does not contain `bogdanfinn` or
+`Berserk-Automation-Hub`. Verify it the way this table was produced:
+
+```
+for f in $(git diff --name-status <base> | awk '$1=="M"{print $2}'); do
+  echo "$(git diff -U0 <base> -- "$f" | grep -E '^[+-][^+-]' \
+          | grep -vcE 'bogdanfinn|Berserk-Automation-Hub') $f"
+done | sort -rn
+```
+
+which prints a non-zero count for exactly `roundtripper.go`, `connect.go`, `go.sum`,
+`client_options.go`, `go.mod`, `racer.go`, `client.go` and zero for all 43 others:
+
+```
+cffi_dist/main.go  cffi_src/factory.go  cffi_src/factory_test.go  cffi_src/types.go
+example/main.go  ja3.go  ja3_trust_anchors_test.go  jar.go  mapper.go  pinner.go
+profiles/{contributed_browser,contributed_custom,grease,internal_browser,internal_custom,profiles}.go
+socks5_udp.go  socks5_udp_test.go  websocket.go  websocket_options.go
+tests/*.go  (23 files)
+```
+
+An earlier revision of this document said **"Three functional patches"** and **"No `.go` file
+changes behaviour"**. Both were false when written and both are corrected above: six patches existed
+already, two more are added here, and five `.go` files change behaviour.
+
+### `go.mod` / `go.sum`
 
 ```
 module github.com/bogdanfinn/tls-client -> github.com/Berserk-Automation-Hub/tls-client
-       bogdanfinn/utls         v1.7.8-barnius -> .../utls         v1.7.8-sightglass.1
-       bogdanfinn/fhttp        v0.6.9         -> .../fhttp        v0.6.9-sightglass.1
-       bogdanfinn/quic-go-utls v1.0.10-utls   -> .../quic-go-utls v1.0.10-sightglass.1
+       bogdanfinn/utls         v1.7.8-barnius -> .../utls         v1.7.8-sightglass.6
+       bogdanfinn/fhttp        v0.6.9         -> .../fhttp        v0.6.9-sightglass.21
+       bogdanfinn/quic-go-utls v1.0.10-utls   -> .../quic-go-utls v1.0.10-sightglass.14
        bogdanfinn/websocket    v1.5.6-barnius -> .../websocket    v1.5.6-sightglass.1
 go 1.24.1 -> 1.27.0
 x/net 0.48.0 -> 0.59.0, testify 1.11.1 -> 1.12.1, brotli 1.2.0 -> 1.2.4,
-circl 1.6.2 -> 1.6.5, x/crypto 0.46.0 -> 0.57.0, x/sys 0.39.0 -> 0.48.0  (+ the rest to current)
+circl 1.6.2 -> 1.6.5, x/crypto 0.46.0 -> 0.57.0, x/sys 0.39.0 -> 0.48.0,
+klauspost/compress 1.18.2 -> 1.20.0, x/text 0.32.0 -> 0.42.0  (+ the rest to current)
 ```
 
-Every internal import moves with the module path. Four dead `//replace ... => ../x` comment lines are
-removed, and `connect.go` is re-gofmt'd because the longer path changed one import block's sort
-order. No `.go` file changes behaviour.
+The four sibling pins are the versions Sightglass's own `go/go.mod` ships, checked on every tag: a
+fork that pinned an older sibling than the consumer would put two builds of that sibling in a
+consumer's graph. Four dead `//replace ... => ../x` comment lines are removed, and `connect.go` is
+re-gofmt'd because the longer path changed one import block's sort order.
 
-Based on **v1.16.0**, the latest upstream, not the v1.15.1 Sightglass pinned.
+## Verification — a REGRESSION DIFF, not a green-suite claim
 
-## Verification, against a pristine v1.16.0 baseline
+Run on 2026-09-17, `go test ./... -count=1` in both trees, Go 1.27.0, darwin/arm64:
+
+| | pristine `v1.16.0` | this fork |
+|---|---|---|
+| `github.com/.../tls-client` | ok | ok |
+| `github.com/.../tls-client/cffi_src` | ok | ok |
+| `github.com/.../tls-client/tests` | FAIL — 1 test | FAIL — 1 test |
 
 ```
-fork: 1 failing test     pristine: 1 failing test
-REGRESSIONS: none
-gofmt: identical to upstream's baseline
-go build ./... clean
+pristine: --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome
+fork:     --- FAIL: TestHTTP3FingerprintWithDefaultValuesForChrome
+
+NEW FAILURES IN THIS FORK: none
+FAILURES FIXED BY THIS FORK: none
 ```
 
-The only failure is the pre-existing upstream one below; it fails in the pristine baseline too. Runs
-that show one extra red are a **network flake**, not a regression: the extra failure is not stable
-(`TestClient_HeaderOrderWithContentLengthHttp1` in one run, `TestHTTP3WithChromeOnCloudflare` in
-another), both hit live external hosts, and both pass 3/3 on re-run in **this fork and the pristine
+`gofmt -l .` prints exactly one file in **both** trees — `profiles/contributed_browser_profiles.go`,
+an upstream file this fork does not touch — so the gofmt baseline is identical to upstream's.
+`go build ./...` is clean. `go vet ./...` reports the same upstream `unkeyed fields` diagnostics in
+`profiles/` in both trees and nothing else.
+
+Runs that show one extra red are a **network flake**, not a regression: `tests/` dials live external
+hosts. The extra failure is not stable (`TestClient_HeaderOrderWithContentLengthHttp1` in one run,
+`TestHTTP3WithChromeOnCloudflare` in another) and both pass on re-run in **this fork and the pristine
 baseline alike**.
 
-## Pre-existing upstream failure (HR-7 — recorded, not ours)
+### Coverage of this module's own package
+
+`go test . -coverprofile` on `github.com/Berserk-Automation-Hub/tls-client`:
+
+```
+before patches 7 and 8:  43.0% of statements
+after:                   47.0% of statements
+```
+
+Every function this fork adds is covered by this fork's own tests, not only by the consumer:
+
+```
+h2identity.go  newH2Identity 100.0%   enablesPush 100.0%   apply 100.0%   newProxyTLSVerify 100.0%
+racer.go       raceContext   100.0%   startRace   100.0%
+roundtripper.go completeHTTP3SettingsOrder 96.7%   buildHTTP3Transport 76.5%
+```
+
+## Pre-existing upstream failure (HR-7 — recorded, not ours), with its root cause
 
 `TestHTTP3FingerprintWithDefaultValuesForChrome` fails in **pristine v1.16.0 and in this fork
 alike**:
@@ -63,10 +180,18 @@ Chrome_133 HTTP/3 fingerprint mismatch.
   actual  : 51:1|m,a,s,p
 ```
 
-tls-client's own Chrome-133 H3 profile emits no `SETTINGS_MAX_FIELD_SECTION_SIZE` (0x06) where its
-own fixture expects one. Worth knowing because it is H3-fingerprint-adjacent — but Sightglass does
-not use tls-client's HTTP/3 path at all (`quich3` owns QUIC/H3 and builds its SETTINGS from the
-profile), so it is on no path we depend on. Recorded rather than hidden.
+The root cause, which was not previously recorded: `profiles.Chrome_133` declares **no HTTP/3 fields
+at all** — no `http3Settings`, no `http3SettingsOrder`, and `http3PriorityParam` zero. The only thing
+`buildHTTP3Transport` has to decide "is this Chrome?" with is
+`profileDefaultMaxResponseHeaderBytes`, which keys off `http3PriorityParam > 0`; for Chrome_133 that
+is false, so `MaxResponseHeaderBytes` becomes `-1`, the "do not send it" sentinel, and
+`SETTINGS_MAX_FIELD_SECTION_SIZE` (0x6) is omitted. The fixture expects it.
+
+It is **not fixed here**, deliberately. Fixing it means declaring Chrome 133's HTTP/3 identity, and
+HR-1 forbids hand-writing a fingerprint value: the numbers in that fixture are upstream's assertion,
+not a capture of ours. The test also dials `quic.browserleaks.com`. Sightglass does not use
+tls-client's HTTP/3 path at all (`quich3` owns QUIC/H3 and builds its SETTINGS from the profile
+document), so it is on no path we depend on. Recorded rather than hidden.
 
 ## Patch 1 — `TransportOptions.HPACKIndexingPolicy`
 
@@ -82,7 +207,8 @@ client_options.go   TransportOptions gains HPACKIndexingPolicy func(hpack.Header
 roundtripper.go     t2.HPACKIndexingPolicy = rt.transportOptions.HPACKIndexingPolicy
                     (inside the existing `if rt.transportOptions != nil` block, next to
                      DisableCompression, so it is set before the first ClientConn exists)
-go.mod              fhttp v0.6.9-sightglass.1 -> v0.6.9-sightglass.2
+go.mod              fhttp v0.6.9-sightglass.1 -> v0.6.9-sightglass.2 (the pin AT THE TIME;
+                    the current pin is in go.mod, which moves with every fhttp tag)
 ```
 
 Two `.go` lines of behaviour, plus a doc comment and one import.
@@ -365,4 +491,161 @@ TransportOptions.HPACKStaticNameLastMatch is not reaching hpack.Encoder
 ## Maintenance
 
 Re-tagging `utls`, `fhttp`, `quic-go-utls` or `websocket` means bumping the matching `require` line
-here and re-tagging this module. That chain is the deliberate cost of the one-stack rule.
+here and re-tagging this module. That chain is the deliberate cost of the one-stack rule, and it is
+not optional: this fork's `go.mod` must never pin an older sibling than Sightglass's own `go/go.mod`
+ships, or a consumer's build graph gets two of that sibling.
+
+This document's front matter — the patch count, the behaviour claim, the file inventory and the
+regression diff — is part of the patch, not commentary on it. Every one of those was wrong at least
+once; they are now derived mechanically (the commands are in "The exact file inventory" and
+"Verification") and every change to this fork must re-derive them.
+
+## Patch 7 — the HTTP/3 race waits on the CALLER's deadline, not a ten-second literal
+
+`racer.go`.
+
+### What was wrong
+
+`startRace` opened its own context:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+```
+
+`context.Background()`, so nothing the caller configured reached it, and `WithTimeoutSeconds` — the
+one timeout knob this library exposes — was silently ignored by the HTTP/3 race. Wrong in **both**
+directions:
+
+- **A caller who asked for LESS did not get it.** `WithTimeoutSeconds(3)` puts a 3-second deadline on
+  the request's context (fhttp `Client.send` -> `setRequestCancel`). Both racing attempts return on
+  it — and then `waitForRaceWinner` went on waiting on a context that does not expire until ten. A
+  client configured for three seconds returned at ten.
+- **A caller who asked for MORE did not get it either.** At ten seconds the race context fired and
+  the request failed with `context deadline exceeded` while the caller's own deadline, and both
+  in-flight attempts, still had time left.
+
+### The fix
+
+```go
+func raceContext(req *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithCancel(req.Context())
+}
+```
+
+The deadline `WithTimeoutSeconds` installs is already on `req.Context()`, so deriving from it makes
+the race end exactly when the caller said, in both directions, with nothing new to plumb.
+`WithCancel` rather than plain `req.Context()` so the winner can still stop the loser the moment it
+wins — which is what the old `cancel()` did and is the only thing that context was good for.
+
+### Guards
+
+`race_timeout_test.go`, two of them, because the failure modes differ:
+
+- `TestRaceContextIsTheCallersNotATenSecondLiteral` — the DEADLINE. Three cases (3s, 60s, none) and
+  the assertion is that the race's deadline **equals the request's**, so it catches the
+  too-short direction, the too-long direction and the "imposed a timeout nobody asked for" direction
+  in one, instantly.
+- `TestStartRaceStopsWhenTheCallersDeadlinePasses` — the BEHAVIOUR. It drives the real `startRace`
+  with an HTTP/2 attempt held open by a transport factory that never returns, a 250ms caller
+  deadline, and a 5-second ceiling — still half the old literal, so a run that reaches it is the
+  defect and not a slow machine.
+
+Ablation, restoring `context.WithTimeout(context.Background(), 10*time.Second)`:
+
+```
+race_timeout_test.go:63: the race expires at ...m=+10.002487126 but the caller's request expires
+    at ...m=+3.002484917 (a difference of 7s): the race is running on its own clock, so a client
+    configured for 3s neither gets that long nor stops when it is up
+race_timeout_test.go:63: ... (a difference of -50s): ... a client configured for 1m0s neither gets
+    that long nor stops when it is up
+race_timeout_test.go:52: the caller set no deadline, yet the race waits on one that expires in 10s:
+    the race is imposing a timeout the client never configured
+race_timeout_test.go:131: the caller's request expired after 250ms and the race was still running
+    5s later: startRace is waiting on context.WithTimeout(context.Background(), 10*time.Second), a
+    literal that the client's WithTimeoutSeconds cannot shorten
+--- FAIL: TestRaceContextIsTheCallersNotATenSecondLiteral (0.00s)
+--- FAIL: TestStartRaceStopsWhenTheCallersDeadlinePasses (5.00s)
+```
+
+### Reachability (HR-7)
+
+This is **not** on the Sightglass shipped path. `sightglass.buildClient` — the one client builder,
+reached from `NewSessionFactory -> Session.Do` — always passes `WithDisableHttp3()` and never
+`WithProtocolRacing()`, so `roundTripper.racer` is nil and `RoundTrip` never calls `race`. The fix is
+here because it is a real defect in this module's own public API, which other consumers use; the
+guard for it therefore lives in this fork, where the defect is, and not in Sightglass parity.
+
+## Patch 8 — the HTTP/3 SETTINGS order is COMPLETE and DETERMINISTIC
+
+`roundtripper.go`.
+
+### What was wrong
+
+HTTP/3 SETTINGS order is fingerprint-bearing — browserleaks' `h3_text` is literally the setting ids
+in the order they arrive — and it was **random**.
+
+`quic-go-utls`'s `settingsFrame.Append` writes the ids named by `AdditionalSettingsOrder` first and
+then writes everything LEFT by ranging over a Go map, whose iteration order Go deliberately
+randomises. Upstream set `AdditionalSettingsOrder` only `if len(cfg.http3SettingsOrder) > 0`, and two
+things made that insufficient:
+
+1. **A profile that declares no order got no order at all.** That is every in-tree profile except
+   `Chrome_144` and `Chrome_133_PSK` — 78 of the 83 in `profiles.MappedTLSClients` — so the whole
+   SETTINGS frame went out in Go map order, a different H3 fingerprint on every process start.
+2. **Two ids could not be named even by a profile that does declare an order.** `0x6`
+   `SETTINGS_MAX_FIELD_SECTION_SIZE` and `0x33` `SETTINGS_H3_DATAGRAM` are contributed by the frame
+   itself, not by `AdditionalSettings`, so they are invisible to this module's maps.
+
+### The fix
+
+`completeHTTP3SettingsOrder` builds an order that names **every** id the frame will carry: the
+profile's own declaration first and verbatim, then every remaining emitted id in ascending numeric
+order, then the random GREASE id last. It runs at the END of `buildHTTP3Transport`, because
+`MaxResponseHeaderBytes` — which decides whether `0x6` is emitted at all — is not settled until then.
+
+**Ascending is a TIE-BREAK, not a claim about any browser** (HR-1). A profile that knows its
+browser's order states it and is followed exactly, which is why the declaration is copied in front
+untouched; ascending only decides the ids the profile could not name, and the alternative to a
+tie-break here is not "the browser's order", it is a coin flip per connection.
+
+For `Chrome_144` the result is byte-identical to before (`[1, 0x6, 7, 0x33, GREASE]` — its
+declaration already covered everything). For the other 78 profiles a random order becomes a fixed
+one.
+
+### Guards
+
+`http3_settings_order_test.go`, three:
+
+- `TestHTTP3SettingsOrderNamesEverySettingEmitted` — COMPLETENESS, over every profile in
+  `profiles.MappedTLSClients`, and also rejects a duplicate id (`Append` deletes as it writes, so a
+  duplicate silently drops whatever would have followed).
+- `TestHTTP3SettingsOrderIsStableOnTheWire` — the WIRE. `wireSettingsOrder` reproduces
+  `settingsFrame.Append` exactly, map range included, and reads one transport 500 times.
+- `TestHTTP3SettingsOrderKeepsTheProfilesOwnDeclarationFirst` — that completing an order never
+  RE-SORTS a declared one. Its first case uses a descending caller declaration (`h3SettingsOrder` is
+  caller-supplied through `cffi_src/types.go`), because an already-ascending declaration cannot show
+  the difference.
+
+Ablations, one per element:
+
+```
+restore upstream's `if len(cfg.http3SettingsOrder) > 0` logic
+  78 of 83 subtests red, e.g.:
+  profile chrome_133: the HTTP/3 SETTINGS frame will carry [0x33], and AdditionalSettingsOrder ([])
+  names none of them. quic-go-utls writes every setting the order does not name by ranging over a
+  Go map (http3/frames.go, settingsFrame.Append), and Go randomises map iteration, so those ids land
+  in a different position on every process start: this profile's HTTP/3 SETTINGS fingerprint is not
+  stable from one run to the next
+  read 2: the HTTP/3 SETTINGS frame carries [7 51 1], read 1 carried [1 7 51] — ...
+
+sort the DECLARED ids too
+  SETTINGS order is [1 7 51]; the caller declared [7 1] and the declaration must be copied verbatim
+  in front. Completing the order must only APPEND the ids the declaration could not name —
+  re-sorting the declared ones replaces a measured SETTINGS order with this code's own tie-break
+```
+
+### Reachability (HR-7)
+
+As with patch 7, **not** on the Sightglass shipped path: `buildClient` always passes
+`WithDisableHttp3()`, and Sightglass's own `quich3` builds its H3 SETTINGS from the profile document.
+This is a defect in this module's own HTTP/3 path, fixed and guarded where it lives.
