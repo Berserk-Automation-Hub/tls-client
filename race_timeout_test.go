@@ -1,8 +1,13 @@
 package tls_client
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,8 +48,7 @@ func TestRaceContextIsTheCallersNotATenSecondLiteral(t *testing.T) {
 				want, _ = ctx.Deadline()
 			}
 
-			raceCtx, cancel := raceContext(req)
-			defer cancel()
+			raceCtx := raceContext(req)
 
 			got, has := raceCtx.Deadline()
 			if tc.timeout == 0 {
@@ -132,4 +136,203 @@ func TestStartRaceStopsWhenTheCallersDeadlinePasses(t *testing.T) {
 			"startRace is waiting on context.WithTimeout(context.Background(), 10*time.Second), a "+
 			"literal that the client's WithTimeoutSeconds cannot shorten", callerTimeout)
 	}
+}
+
+// raceStubTransport is the HTTP/2 attempt, stubbed: it records the request context it was handed
+// and answers immediately, so it is the one that wins the race.
+type raceStubTransport struct {
+	mu  sync.Mutex
+	ctx context.Context
+}
+
+func (s *raceStubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	s.ctx = req.Context()
+	s.mu.Unlock()
+	return &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Proto:      "HTTP/2.0",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    req,
+	}, nil
+}
+
+func (s *raceStubTransport) seen() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx
+}
+
+// http3AttemptStillRunning reports whether the goroutine startRace launched for the HTTP/3 attempt
+// is still on a stack. The needle is the METHOD's qualified name, not the bare word, so this
+// helper's own frame cannot match itself.
+func http3AttemptStillRunning() bool {
+	buf := make([]byte, 1<<20)
+	return bytes.Contains(buf[:runtime.Stack(buf, true)], []byte("protocolRacer).attemptHTTP3"))
+}
+
+// TestStartRaceStopsTheLoserAndNotTheWinner is the guard on raceAttempt — the per-attempt request
+// contexts and the loser-only cancel.
+//
+// Both attempts used to be launched with the caller's untouched *http.Request, so the cancel the
+// racer held reached NEITHER of them: it cancelled only the context waitForRaceWinner was selecting
+// on, one statement before returning. The loser was never stopped. Two things have to be true and
+// they pull in opposite directions, which is why they are asserted together:
+//
+//   - the LOSER is cancelled the moment the winner returns, rather than left dialing;
+//   - the WINNER is NOT, because both transports abort the stream on request-context cancellation
+//     and the caller has not read the body yet.
+//
+// The HTTP/3 attempt is the loser, held in flight by a UDP socket that swallows its QUIC Initial
+// packets and never answers: without a cancel it stays there for quic-go's handshake idle timeout
+// (5s by default), which is far longer than this test's window.
+func TestStartRaceStopsTheLoserAndNotTheWinner(t *testing.T) {
+	blackhole, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot open a loopback UDP socket here (%v), so the HTTP/3 attempt cannot be held "+
+			"in flight and the loser-cancel has nothing to observe", err)
+	}
+	defer blackhole.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			if _, _, rerr := blackhole.ReadFrom(buf); rerr != nil {
+				return
+			}
+		}
+	}()
+	addr := blackhole.LocalAddr().String()
+
+	winner := &raceStubTransport{}
+	pr := newProtocolRacer(
+		nil, false, "", nil, nil,
+		make(map[string]http.RoundTripper),
+		&sync.Mutex{},
+		nil, nil, nil, nil,
+		profiles.Chrome_144.GetHttp3Settings(),
+		profiles.Chrome_144.GetHttp3SettingsOrder(),
+		profiles.Chrome_144.GetHttp3PriorityParam(),
+		profiles.Chrome_144.GetHttp3PseudoHeaderOrder(),
+		profiles.Chrome_144.GetHttp3SendGreaseFrames(),
+		"",
+	)
+
+	req, err := http.NewRequest(http.MethodGet, "https://"+addr+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	defer cancelCaller()
+	req = req.WithContext(callerCtx)
+
+	resp, err := pr.startRace(req, addr, func(_ *http.Request, key string) error {
+		// Called with pr.cachedTransportsLck already held by attemptHTTP2.
+		pr.cachedTransports[key] = winner
+		return nil
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("the stubbed HTTP/2 attempt should have won the race: resp=%v err=%v", resp, err)
+	}
+
+	// THE WINNER. Its context must be alive: fhttp's http2 transport and quic-go's http3 transport
+	// both abort the stream when the request context is cancelled, so cancelling the winner here
+	// would hand the caller a response whose body is already dead.
+	got := winner.seen()
+	if got == nil {
+		t.Fatal("the winning attempt never reached the transport, so nothing was observed")
+	}
+	if got == callerCtx {
+		t.Fatal("the winning attempt was launched with the CALLER's request unchanged. Both " +
+			"attempts then share one context, so no cancel can stop one without stopping the other " +
+			"— which is how the loser came to be left running")
+	}
+	if err := got.Err(); err != nil {
+		t.Fatalf("the WINNER's request context is already cancelled (%v) when startRace returns. "+
+			"The caller has not read the body yet and both transports abort the stream on "+
+			"request-context cancellation, so this hands back a dead response", err)
+	}
+
+	// THE LOSER. It is cancelled, so its goroutine unwinds instead of waiting out the QUIC
+	// handshake idle timeout against the black hole.
+	deadline := time.Now().Add(2 * time.Second)
+	for http3AttemptStillRunning() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the HTTP/2 attempt won the race and the HTTP/3 attempt was still in flight 2s "+
+				"later, against a UDP black hole at %s. The loser is not being cancelled: both "+
+				"attempts are running on a context the racer cannot reach, so the losing dial holds "+
+				"its socket until QUIC's own handshake idle timeout", addr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestStartRaceStopsBothAttemptsWhenNobodyWins is the other half of raceAttempt's contract: when the
+// race produces no response there is no body to protect, so BOTH derived contexts are released
+// rather than left registered on the caller's context for the rest of the request.
+//
+// The HTTP/3 attempt is failed without touching the network — buildHTTP3Transport refuses a
+// non-SOCKS5 proxy, because only SOCKS5 can tunnel QUIC's UDP — and the HTTP/2 attempt is a stub
+// that returns an error, so both attempts are finished and the caller's context is still alive.
+func TestStartRaceStopsBothAttemptsWhenNobodyWins(t *testing.T) {
+	failing := &raceFailingTransport{}
+	pr := newProtocolRacer(
+		nil, false, "", nil, nil,
+		make(map[string]http.RoundTripper),
+		&sync.Mutex{},
+		nil, nil, nil, nil,
+		nil, nil, 0, nil, false,
+		"http://127.0.0.1:9", // not SOCKS5: the HTTP/3 transport refuses to build
+	)
+
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:9/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	defer cancelCaller()
+	req = req.WithContext(callerCtx)
+
+	resp, err := pr.startRace(req, "127.0.0.1:9", func(_ *http.Request, key string) error {
+		pr.cachedTransports[key] = failing
+		return nil
+	})
+	if err == nil || resp != nil {
+		t.Fatalf("both attempts were rigged to fail; startRace returned resp=%v err=%v", resp, err)
+	}
+
+	got := failing.seen()
+	if got == nil {
+		t.Fatal("the HTTP/2 attempt never reached the transport, so nothing was observed")
+	}
+	if got.Err() == nil {
+		t.Fatal("no attempt won, yet the HTTP/2 attempt's derived context is still uncancelled " +
+			"after startRace returned. Nothing depends on it — there is no response body — so it " +
+			"stays registered on the caller's context for the rest of the request, once per race")
+	}
+	if callerCtx.Err() != nil {
+		t.Fatalf("startRace cancelled the CALLER's context (%v). It only ever gets to cancel the "+
+			"children it created", callerCtx.Err())
+	}
+}
+
+// raceFailingTransport is the HTTP/2 attempt, stubbed to lose: it records the request context it was
+// handed and returns an error.
+type raceFailingTransport struct {
+	mu  sync.Mutex
+	ctx context.Context
+}
+
+func (s *raceFailingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	s.ctx = req.Context()
+	s.mu.Unlock()
+	return nil, errors.New("stubbed HTTP/2 attempt: refused")
+}
+
+func (s *raceFailingTransport) seen() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx
 }

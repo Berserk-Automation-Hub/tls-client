@@ -168,21 +168,63 @@ func (pr *protocolRacer) createTransportForProtocol(protocol, addr string, req *
 //     deadline, and both in-flight attempts, still had time left.
 //
 // Deriving it from req.Context() makes the race end exactly when the caller said, because the
-// deadline WithTimeoutSeconds installs is already on that context. WithCancel rather than plain
-// req.Context() so the winner can still stop the loser the moment it wins.
-func raceContext(req *http.Request) (context.Context, context.CancelFunc) {
-	return context.WithCancel(req.Context())
+// deadline WithTimeoutSeconds installs is already on that context.
+//
+// It is returned PLAIN, with no derived cancel of its own. A cancel here could only be called by
+// the racer, and the racer has nothing to say about when the CALLER's wait should end. Stopping the
+// loser is done on the loser's own request (see raceAttempt), which is the only place a cancel
+// actually reaches an attempt that is still in flight.
+func raceContext(req *http.Request) context.Context {
+	return req.Context()
+}
+
+// raceAttempt gives ONE racing attempt its own copy of the request, carrying its own cancellable
+// child of the caller's context.
+//
+// This is what makes stopping the loser real. Both attempts used to be launched with the caller's
+// untouched *http.Request, so the cancel the racer held reached neither of them: it cancelled only
+// the context waitForRaceWinner was itself selecting on, one statement before returning, and
+// startRace's own deferred cancel fired a moment later anyway. The loser went on dialing,
+// handshaking and holding a socket long after the request it belonged to had been answered — for
+// the HTTP/3 attempt against an unresponsive host, for the whole QUIC handshake idle timeout.
+//
+// Per-attempt rather than one shared derived context, because the WINNER's context must SURVIVE:
+// both fhttp's HTTP/2 transport and quic-go's HTTP/3 transport abort the stream when the request
+// context is cancelled, so a single shared cancel would tear down the body the caller is about to
+// read. The winner's child is deliberately left uncancelled and ends with its parent, the caller's
+// request — exactly the lifetime the response body has.
+func raceAttempt(req *http.Request) (*http.Request, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(req.Context())
+	return req.WithContext(ctx), cancel
 }
 
 func (pr *protocolRacer) startRace(req *http.Request, addr string, getTransportFunc func(*http.Request, string) error) (*http.Response, error) {
 	resultCh := make(chan racingResult, 2)
-	ctx, cancel := raceContext(req)
-	defer cancel()
 
-	go pr.attemptHTTP3(req, resultCh)
-	go pr.attemptHTTP2(req, addr, getTransportFunc, resultCh)
+	h3Req, stopHTTP3 := raceAttempt(req)
+	h2Req, stopHTTP2 := raceAttempt(req)
 
-	return pr.waitForRaceWinner(ctx, addr, resultCh, cancel)
+	go pr.attemptHTTP3(h3Req, resultCh)
+	go pr.attemptHTTP2(h2Req, addr, getTransportFunc, resultCh)
+
+	resp, err := pr.waitForRaceWinner(raceContext(req), addr, resultCh, func(winner string) {
+		// The LOSER, and only the loser: the winner's response body is still to be read, on the
+		// winner's own request context.
+		if winner == "h3" {
+			stopHTTP2()
+			return
+		}
+		stopHTTP3()
+	})
+
+	if resp == nil {
+		// Nobody won, so no response body depends on either context: stop both attempts rather
+		// than leave them dialing for a request that has already failed.
+		stopHTTP3()
+		stopHTTP2()
+	}
+
+	return resp, err
 }
 
 func (pr *protocolRacer) attemptHTTP3(req *http.Request, resultCh chan<- racingResult) {
@@ -220,7 +262,9 @@ func (pr *protocolRacer) attemptHTTP2(req *http.Request, addr string, getTranspo
 	resultCh <- racingResult{protocol: "h2", response: resp, err: err}
 }
 
-func (pr *protocolRacer) waitForRaceWinner(ctx context.Context, addr string, resultCh <-chan racingResult, cancel context.CancelFunc) (*http.Response, error) {
+// waitForRaceWinner returns the first attempt that produces a response, and calls stopLoser with the
+// winning protocol so the other attempt is torn down instead of being left in flight.
+func (pr *protocolRacer) waitForRaceWinner(ctx context.Context, addr string, resultCh <-chan racingResult, stopLoser func(winner string)) (*http.Response, error) {
 	var lastErr error
 
 	for i := 0; i < 2; i++ {
@@ -228,7 +272,7 @@ func (pr *protocolRacer) waitForRaceWinner(ctx context.Context, addr string, res
 		case result := <-resultCh:
 			if result.err == nil && result.response != nil {
 				pr.cacheWinningProtocol(addr, result.protocol)
-				cancel()
+				stopLoser(result.protocol)
 				return result.response, nil
 			}
 			lastErr = result.err
