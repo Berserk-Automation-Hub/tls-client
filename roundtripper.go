@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -255,27 +256,16 @@ func buildHTTP3Transport(cfg *http3Config) (http.RoundTripper, error) {
 	// Add random GREASE setting only for browsers that send it (Chrome)
 	// Firefox sends GREASE frames but not random GREASE settings
 	// Use priority parameter as identification: Chrome has it, Firefox doesn't
+	var greaseID uint64
+	var hasGrease bool
 	if cfg.http3PriorityParam > 0 {
-		greaseID := generateGREASESettingID()
-		greaseValue := generateGREASESettingValue()
+		greaseID = generateGREASESettingID()
+		hasGrease = true
 
 		if http3Settings == nil {
 			http3Settings = make(map[uint64]uint64)
 		}
-		http3Settings[greaseID] = greaseValue
-
-		// Set the order if available, and append GREASE at the end
-		if len(cfg.http3SettingsOrder) > 0 {
-			orderWithGrease := make([]uint64, len(cfg.http3SettingsOrder)+1)
-			copy(orderWithGrease, cfg.http3SettingsOrder)
-			orderWithGrease[len(cfg.http3SettingsOrder)] = greaseID
-			t3.AdditionalSettingsOrder = orderWithGrease
-		}
-	} else {
-		// Just use the settings order as-is without random GREASE
-		if len(cfg.http3SettingsOrder) > 0 {
-			t3.AdditionalSettingsOrder = cfg.http3SettingsOrder
-		}
+		http3Settings[greaseID] = generateGREASESettingValue()
 	}
 
 	t3.AdditionalSettings = http3Settings
@@ -309,7 +299,83 @@ func buildHTTP3Transport(cfg *http3Config) (http.RoundTripper, error) {
 		t3.MaxResponseHeaderBytes = profileDefaultMaxResponseHeaderBytes(cfg)
 	}
 
+	// LAST, because it needs the SETTINGS this transport will actually emit, and
+	// MaxResponseHeaderBytes decides one of them.
+	t3.AdditionalSettingsOrder = completeHTTP3SettingsOrder(cfg.http3SettingsOrder, t3, greaseID, hasGrease)
+
 	return t3, nil
+}
+
+// The two SETTINGS ids quic-go-utls's settingsFrame contributes itself rather than taking from
+// AdditionalSettings, so nothing in this module's own maps ever names them (http3/frames.go).
+const (
+	settingH3MaxFieldSectionSize uint64 = 0x6
+	settingH3Datagram            uint64 = 0x33
+)
+
+// completeHTTP3SettingsOrder returns an order that names EVERY setting the HTTP/3 SETTINGS frame
+// will carry, so none of them is left to be written in Go map order.
+//
+// SETTINGS ORDER IS FINGERPRINT-BEARING — browserleaks' h3_text is literally the ids in the order
+// they arrive — so a nondeterministic order is a divergence, not a detail.
+//
+// quic-go-utls writes the ids named by AdditionalSettingsOrder first and then writes whatever is
+// LEFT by ranging over a Go map (settingsFrame.Append), and Go randomises map iteration. Two ids
+// were structurally impossible to name before this: 0x6 SETTINGS_MAX_FIELD_SECTION_SIZE and 0x33
+// SETTINGS_H3_DATAGRAM are added by the frame itself, not by AdditionalSettings, so a profile's own
+// http3SettingsOrder could name them only by naming ids the profile does not carry. And a profile
+// that declares NO order — which is every in-tree profile except Chrome_144 and Chrome_133_PSK —
+// got no order at all, so its entire SETTINGS frame was randomly ordered, a different H3
+// fingerprint on every process start.
+//
+// The order produced is: the profile's own declaration first and unchanged, then every remaining
+// emitted id in ASCENDING numeric order, then the random GREASE id last. Ascending is a TIE-BREAK,
+// not a claim about any browser: a profile that knows its browser's order states it and is followed
+// exactly, which is why the declaration is copied verbatim ahead of everything else.
+func completeHTTP3SettingsOrder(declared []uint64, t3 *http3.Transport, greaseID uint64, hasGrease bool) []uint64 {
+	emitted := make(map[uint64]struct{}, len(t3.AdditionalSettings)+2)
+	for id := range t3.AdditionalSettings {
+		emitted[id] = struct{}{}
+	}
+	// settingsFrame.Append writes MaxFieldSectionSize whenever it is not negative; -1 is the
+	// "do not send it" sentinel (Firefox).
+	if t3.MaxResponseHeaderBytes >= 0 {
+		emitted[settingH3MaxFieldSectionSize] = struct{}{}
+	}
+	if t3.EnableDatagrams {
+		emitted[settingH3Datagram] = struct{}{}
+	}
+
+	named := make(map[uint64]struct{}, len(emitted))
+	order := make([]uint64, 0, len(emitted)+len(declared))
+	for _, id := range declared {
+		if _, dup := named[id]; dup {
+			continue
+		}
+		named[id] = struct{}{}
+		order = append(order, id)
+	}
+
+	rest := make([]uint64, 0, len(emitted))
+	for id := range emitted {
+		if _, ok := named[id]; ok {
+			continue
+		}
+		if hasGrease && id == greaseID {
+			continue // GREASE goes last, not in numeric position
+		}
+		rest = append(rest, id)
+	}
+	sort.Slice(rest, func(i, j int) bool { return rest[i] < rest[j] })
+	order = append(order, rest...)
+
+	if hasGrease {
+		if _, ok := named[greaseID]; !ok {
+			order = append(order, greaseID)
+		}
+	}
+
+	return order
 }
 
 func profileDefaultMaxResponseHeaderBytes(cfg *http3Config) int {
