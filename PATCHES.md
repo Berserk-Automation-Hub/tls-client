@@ -1006,9 +1006,22 @@ against, in the same profile, the patch 1-6 elements that ARE on that path:
 ```
 h2identity.go:34   newH2Identity     100.0%
 h2identity.go:58   enablesPush       100.0%
-h2identity.go:65   apply              62.5%
-h2identity.go:133  newProxyTLSVerify 100.0%
+h2identity.go:65   apply              65.6%
+h2identity.go:135  newProxyTLSVerify 100.0%
 ```
+
+Re-measured for `v1.16.0-sightglass.12` on 2026-09-17 (`ok .../go/sightglass coverage: 28.7% of
+statements in .../tls-client`): every function in `racer.go` is still **0.0%**, as are
+`buildHTTP3Transport` and `completeHTTP3SettingsOrder`.
+
+The SIGHTGLASS-side proof for the part of this fork that IS on that path is
+`go/parity/h2_identity_shipped_wire_test.go` `TestParityShippedPathHTTP2Identity`, which drives
+`sightglass.NewSessionFactory -> Open -> Session.Do` and reads the SETTINGS, the stream-0
+WINDOW_UPDATE, the standalone-PRIORITY count and the HEADERS-embedded PRIORITY block off the socket.
+Dropping `rt.h2.apply(&t2)` here reddens it: *"the shipped session's SETTINGS carries 1 entries (2);
+the capture says 4"*. Dropping `t.ConnectionFlow` alone does NOT, and that is arithmetic rather than
+a hole — Sightglass's profile is Chrome 152, whose connection flow IS fhttp's default 15663105 — so
+that assignment is guarded here, where `firefox_102` can tell the two apart.
 
 The fix is made here because it is a real defect in this module's own public API, which other
 consumers use, and `racer.go` is upstream code we do not get to delete. The guard therefore lives in
