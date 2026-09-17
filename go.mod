@@ -3,9 +3,9 @@ module github.com/Berserk-Automation-Hub/tls-client
 go 1.27.0
 
 require (
-	github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.8
-	github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.1
-	github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.1
+	github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.21
+	github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.14
+	github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.6
 	github.com/Berserk-Automation-Hub/websocket v1.5.6-sightglass.1
 	github.com/bdandy/go-socks4 v1.2.3
 	github.com/google/uuid v1.6.0

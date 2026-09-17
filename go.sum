@@ -1,11 +1,9 @@
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.2 h1:q47ZX8cLPvrumbETeDtPJ6anRz9C6i20/AitZ++hIyA=
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.2/go.mod h1:G49b41b5+54ARXvdQxefhJsnpE6xSkV4cQ9qu7f0VSo=
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.8 h1:NOv7s0H/y6bB3Jd7aUohrrWj+HQB+keVU6ke2UKojDY=
-github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.8/go.mod h1:G49b41b5+54ARXvdQxefhJsnpE6xSkV4cQ9qu7f0VSo=
-github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.1 h1:TovjKotQRnuH7N3FvqX6QWgrWxXcvRS7LLAzur9LhS4=
-github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.1/go.mod h1:osw6mi2AsRgzMKAEGv6MKsSmH0/5+TvS8GX4xwWjHj8=
-github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.1 h1:6mM/P3b/VcMyRpKxt8UZAVgf6gX7rw51zoHjT3NZrek=
-github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.1/go.mod h1:oOrji1Pk4KkzDprPz+Qf8KGZ69twtD9outEMBSnpG5I=
+github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.21 h1:3/cyqI/Hn73vyilffXnKHM55HdfZ/v4uYDtQ1lFk1Ao=
+github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.21/go.mod h1:RQEVJvXJbVbohbbp8vZGdFKHJvkA/hyEpkEEXLXD32Y=
+github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.14 h1:TkS2Ztm0UZVPmD1Hpl2Kbvi2txbsYYdcxOUTJzDV8RE=
+github.com/Berserk-Automation-Hub/quic-go-utls v1.0.10-sightglass.14/go.mod h1:bjrTbwLvZAwzDLVniLx6Nl2YrwUEeXnFE97OtalVsZw=
+github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.6 h1:JzQecI3INgeIN4gID6uOD7i1dqS4HB53caYOaCi69ns=
+github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.6/go.mod h1:oOrji1Pk4KkzDprPz+Qf8KGZ69twtD9outEMBSnpG5I=
 github.com/Berserk-Automation-Hub/websocket v1.5.6-sightglass.1 h1:0Zvpku2j6Owa+76kip8Pk7yfOofTXS141hRmi8tq9jo=
 github.com/Berserk-Automation-Hub/websocket v1.5.6-sightglass.1/go.mod h1:tAFRanAQU691X6CkFadOzoJtEFXOWr/I7EUKerPsyYc=
 github.com/andybalholm/brotli v1.2.4 h1:649LN6qF+/7JJYNN3Wdu4Dt5PS6eC/yP/Go3Bb0/AHI=
