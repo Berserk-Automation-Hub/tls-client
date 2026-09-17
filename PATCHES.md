@@ -422,6 +422,23 @@ projection that is right and a dial that ignores it are different failures:
   client that got through is visible as an observation; the test requires none, and requires the
   error to be a certificate rejection rather than any other failure.
 
+And because this is the one patch in this fork that IS on Sightglass's shipped path —
+`newProxyTLSVerify` is 100.0% in `go test ./sightglass/... -coverpkg=.../tls-client`, against every
+function in `racer.go` at 0.0% — it is guarded there too, by
+`TestParityHTTPSProxyCertificateIsVerifiedOnTheShippedPath` in `go/parity/`, which drives
+`sightglass.NewSessionFactory -> Open -> Session.Do` with `Identity.Proxy` pointing at a self-signed
+loopback proxy and asserts BOTH directions of `TransportPolicy.Insecure`. Its two ablations, run
+against this fork through a scratchpad `go.work` so Sightglass's own `go.mod` keeps zero `replace`
+directives:
+
+```
+newProxyTLSVerify hard-codes true      "the session tunnelled \"CONNECT origin.invalid:443
+                                        HTTP/1.1\" through a self-signed https:// proxy although
+                                        TransportPolicy.Insecure is false"
+connect.go drops the two config lines  "TransportPolicy.Insecure is true and the session still did
+                                        not complete the TLS handshake to the self-signed proxy"
+```
+
 Ablation, `newProxyTLSVerify` hard-coding `insecureSkipVerify: true`:
 
 ```
