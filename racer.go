@@ -198,30 +198,49 @@ func raceAttempt(req *http.Request) (*http.Request, context.CancelFunc) {
 	return req.WithContext(ctx), cancel
 }
 
+// raceAttemptHandle is one racing attempt: the protocol it speaks and the cancel that stops it.
+//
+// The two live in ONE list with ONE release policy on purpose. They used to be released by three
+// separate statements -- stopHTTP2() on an h3 win, stopHTTP3() on an h2 win, and both again when
+// nobody won -- and a statement that only runs on one of those three outcomes is a statement no
+// single test observes: deleting the nobody-won stopHTTP3() left the whole suite green. Releasing
+// every attempt except the winner, from one place, means each of these three facts is on a path
+// some test already drives, and the outcomes cannot drift apart again.
+type raceAttemptHandle struct {
+	protocol string
+	stop     context.CancelFunc
+}
+
 func (pr *protocolRacer) startRace(req *http.Request, addr string, getTransportFunc func(*http.Request, string) error) (*http.Response, error) {
 	resultCh := make(chan racingResult, 2)
 
 	h3Req, stopHTTP3 := raceAttempt(req)
 	h2Req, stopHTTP2 := raceAttempt(req)
+	attempts := []raceAttemptHandle{
+		{protocol: "h3", stop: stopHTTP3},
+		{protocol: "h2", stop: stopHTTP2},
+	}
+
+	// stopAllExcept releases every attempt but the named one. The WINNER is the exception because
+	// its response body is still to be read on its own request context, and both transports abort
+	// the stream when that context is cancelled.
+	stopAllExcept := func(keep string) {
+		for _, a := range attempts {
+			if a.protocol != keep {
+				a.stop()
+			}
+		}
+	}
 
 	go pr.attemptHTTP3(h3Req, resultCh)
 	go pr.attemptHTTP2(h2Req, addr, getTransportFunc, resultCh)
 
-	resp, err := pr.waitForRaceWinner(raceContext(req), addr, resultCh, func(winner string) {
-		// The LOSER, and only the loser: the winner's response body is still to be read, on the
-		// winner's own request context.
-		if winner == "h3" {
-			stopHTTP2()
-			return
-		}
-		stopHTTP3()
-	})
+	resp, err := pr.waitForRaceWinner(raceContext(req), addr, resultCh, stopAllExcept)
 
 	if resp == nil {
-		// Nobody won, so no response body depends on either context: stop both attempts rather
-		// than leave them dialing for a request that has already failed.
-		stopHTTP3()
-		stopHTTP2()
+		// Nobody won, so no response body depends on any of these contexts: "" keeps nothing, so
+		// every attempt is released rather than left dialing for a request that has already failed.
+		stopAllExcept("")
 	}
 
 	return resp, err

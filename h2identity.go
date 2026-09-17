@@ -98,13 +98,15 @@ func (id *h2Identity) apply(t *http2.Transport) {
 		t.PushHandler = &http2.DefaultPushHandler{}
 	}
 
-	// A nil order means "send none"; a nil slice would make fhttp fall back to its own, which is a
-	// different pseudo-header order on the wire.
-	if id.pseudoHeaderOrder == nil {
-		t.PseudoHeaderOrder = []string{}
-	} else {
-		t.PseudoHeaderOrder = id.pseudoHeaderOrder
-	}
+	// The profile's order, verbatim, INCLUDING "none".
+	//
+	// This used to normalise a nil order to []string{}, on the stated grounds that "a nil slice
+	// would make fhttp fall back to its own". It does not: fhttp's encodeHeaders reads
+	// `pHeaderOrder = cc.t.PseudoHeaderOrder; ok = len(pHeaderOrder) > 0` (http2/transport.go), so
+	// nil and the empty slice take the SAME branch and put the SAME bytes on the wire. The
+	// normalisation was unobservable, nothing else in either module reads the field, and it was
+	// deleted rather than guarded -- an element no test can redden is either a defect or dead.
+	t.PseudoHeaderOrder = id.pseudoHeaderOrder
 
 	if id.settings == nil {
 		// No profile settings: fhttp's historical defaults. The ORDER of these four is genuinely
