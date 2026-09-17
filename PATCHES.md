@@ -567,13 +567,36 @@ race_timeout_test.go:131: the caller's request expired after 250ms and the race 
 --- FAIL: TestStartRaceStopsWhenTheCallersDeadlinePasses (5.00s)
 ```
 
-### Reachability (HR-7)
+### Reachability (HR-7), measured
 
-This is **not** on the Sightglass shipped path. `sightglass.buildClient` — the one client builder,
-reached from `NewSessionFactory -> Session.Do` — always passes `WithDisableHttp3()` and never
-`WithProtocolRacing()`, so `roundTripper.racer` is nil and `RoundTrip` never calls `race`. The fix is
-here because it is a real defect in this module's own public API, which other consumers use; the
-guard for it therefore lives in this fork, where the defect is, and not in Sightglass parity.
+This is **not** on the Sightglass shipped path, and that is a coverage reading rather than an
+argument. `sightglass.buildClient` — the one client builder, reached from
+`NewSessionFactory -> Session.Do` — always passes `WithDisableHttp3()` and never
+`WithProtocolRacing()`, so `roundTripper.racer` is nil and `RoundTrip` never calls `race`.
+
+```
+$ go test ./sightglass/... -coverpkg=github.com/Berserk-Automation-Hub/tls-client -coverprofile=...
+ok  ...Sightglass/go/sightglass  coverage: 28.9% of statements in .../tls-client
+
+racer.go:47   newProtocolRacer   0.0%      racer.go:173  raceContext    0.0%
+racer.go:90   race               0.0%      racer.go:177  startRace      0.0%
+racer.go:203  attemptHTTP2       0.0%      racer.go:188  attemptHTTP3   0.0%
+racer.go:223  waitForRaceWinner  0.0%      ... every function in racer.go: 0.0%
+```
+
+against, in the same profile, the patch 1-6 elements that ARE on that path:
+
+```
+h2identity.go:34   newH2Identity     100.0%
+h2identity.go:58   enablesPush       100.0%
+h2identity.go:65   apply              62.5%
+h2identity.go:133  newProxyTLSVerify 100.0%
+```
+
+The fix is made here because it is a real defect in this module's own public API, which other
+consumers use, and `racer.go` is upstream code we do not get to delete. The guard therefore lives in
+this fork, where the defect is, and not in Sightglass parity — putting it there would be guarding a
+path Sightglass does not take, which is the exact failure mode this repository keeps finding.
 
 ## Patch 8 — the HTTP/3 SETTINGS order is COMPLETE and DETERMINISTIC
 
@@ -644,8 +667,11 @@ sort the DECLARED ids too
   re-sorting the declared ones replaces a measured SETTINGS order with this code's own tie-break
 ```
 
-### Reachability (HR-7)
+### Reachability (HR-7), measured
 
-As with patch 7, **not** on the Sightglass shipped path: `buildClient` always passes
-`WithDisableHttp3()`, and Sightglass's own `quich3` builds its H3 SETTINGS from the profile document.
-This is a defect in this module's own HTTP/3 path, fixed and guarded where it lives.
+As with patch 7, **not** on the Sightglass shipped path, and measured the same way — in the coverage
+profile above, `roundtripper.go:210 buildHTTP3Transport` and `roundtripper.go:335
+completeHTTP3SettingsOrder` are both **0.0%** when the whole `sightglass` package suite drives
+`tls-client`. `buildClient` always passes `WithDisableHttp3()`, and Sightglass's own `quich3` builds
+its H3 SETTINGS from the profile document. This is a defect in this module's own HTTP/3 path, fixed
+and guarded where it lives; in this fork's own suite the two functions are 76.5% and 96.7%.
