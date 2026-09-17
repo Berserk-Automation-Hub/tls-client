@@ -310,6 +310,40 @@ func TestHTTP3SettingsOrderCompletionIsAscendingAndGreaseLast(t *testing.T) {
 		t.Logf("GREASE 0x%x is last in %v", grease[0], order)
 	})
 
+	t.Run("a caller's MaxResponseHeaderBytes puts 0x6 in the frame, so the order must name it", func(t *testing.T) {
+		// SETTINGS_MAX_FIELD_SECTION_SIZE is contributed by quic-go-utls's settingsFrame itself, not
+		// by AdditionalSettings, so completion has to decide whether it will be emitted. It reads
+		// t3.MaxResponseHeaderBytes >= 0 -- and a CALLER can make that true for any profile through
+		// TransportOptions.MaxResponseHeaderBytes, including the 78 profiles that declare no
+		// http3SettingsOrder at all. Only chrome_144 and chrome_144_PSK reach this in-tree, and both
+		// happen to name 0x6 in their own declaration, so nothing else here can observe the rule.
+		cfg := &http3Config{
+			http3Settings:    map[uint64]uint64{1: 65536, 7: 100},
+			transportOptions: &TransportOptions{MaxResponseHeaderBytes: 262144},
+			// no http3SettingsOrder: the profile names nothing, so completion names everything
+		}
+		rt, err := buildHTTP3Transport(cfg)
+		if err != nil {
+			t.Fatalf("buildHTTP3Transport: %v", err)
+		}
+		t3 := rt.(*http3.Transport)
+		if t3.MaxResponseHeaderBytes < 0 {
+			t.Fatalf("the caller asked for MaxResponseHeaderBytes=262144 and the transport carries "+
+				"%d; with a negative value 0x6 is not emitted and this subtest asserts nothing",
+				t3.MaxResponseHeaderBytes)
+		}
+		for _, id := range t3.AdditionalSettingsOrder {
+			if id == settingH3MaxFieldSectionSize {
+				t.Logf("0x6 is named in %v", t3.AdditionalSettingsOrder)
+				return
+			}
+		}
+		t.Fatalf("the HTTP/3 SETTINGS frame will carry 0x6 SETTINGS_MAX_FIELD_SECTION_SIZE because "+
+			"the caller set MaxResponseHeaderBytes, and AdditionalSettingsOrder (%v) does not name "+
+			"it. quic-go-utls writes every unnamed id by ranging a Go map, so 0x6 lands in a "+
+			"different position on every process start", t3.AdditionalSettingsOrder)
+	})
+
 	t.Run("a declaration that repeats an id is deduplicated", func(t *testing.T) {
 		// h3SettingsOrder is caller-supplied through cffi_src/types.go, so a repeated id is a shape
 		// this module receives rather than one it generates. settingsFrame.Append DELETES an id from
