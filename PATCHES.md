@@ -51,10 +51,12 @@ so this fork is not behind.
 
 ## The exact file inventory
 
-Mechanically derived from `git diff --name-status <base>..HEAD`, not written from memory. **57 files
-in total: 9 added, 48 modified.**
+Mechanically derived from `git diff --name-status <base>..HEAD`, not written from memory, and
+CHECKED — `patches_doc_test.go` recomputes the diff and fails if this section does not match it.
+**60 files in total: 10 added, 50 modified.** The 50 are 48 `.go` files plus `go.mod` and
+`go.sum`.
 
-### Added — 9 files
+### Added — 10 files
 
 | file | what it is |
 |---|---|
@@ -67,6 +69,7 @@ in total: 9 added, 48 modified.**
 | `proxy_clienthello_test.go` | guard for patch 5 |
 | `race_timeout_test.go` | guards for patch 7 |
 | `http3_settings_order_test.go` | guards for patch 8 |
+| `patches_doc_test.go` | the guard on THIS section and on the header's patch count |
 
 ### Modified, and behaviour changes — 5 `.go` files
 
@@ -78,7 +81,10 @@ in total: 9 added, 48 modified.**
 | `client.go` | both `newConnectDialer` call sites pass `newH2Identity(...)` and `newProxyTLSVerify(...)` (patches 2, 3, 5) |
 | `racer.go` | the HTTP/3 race waits on the CALLER's context, not a ten-second literal (patch 7) |
 
-### Modified, import path only — 43 `.go` files, plus `go.mod` and `go.sum`
+### Modified, import path only — 43 `.go` files
+
+(43 = 48 modified `.go` files minus the 5 above. `go.mod` and `go.sum` make up the other two of the
+50 modified files and are described at the end of this section.)
 
 Every remaining modified file changes on no line that does not contain `bogdanfinn` or
 `Berserk-Automation-Hub`. Verify it the way this table was produced:
@@ -104,6 +110,19 @@ tests/*.go  (23 files)
 An earlier revision of this document said **"Three functional patches"** and **"No `.go` file
 changes behaviour"**. Both were false when written and both are corrected above: six patches existed
 already, two more are added here, and five `.go` files change behaviour.
+
+Correcting them is not enough on its own — they were correct once too, and a later commit left them
+behind. `patches_doc_test.go` now reads this document and fails when it drifts:
+
+- `TestPATCHESMDPatchCountMatchesItsOwnSections` — the header's spelled-out count must equal the
+  number of `## Patch N —` sections, and those must be numbered 1..N in order with no repeat or gap.
+  Needs no git, so it runs everywhere, including from an extracted module zip.
+- `TestPATCHESMDFileInventoryMatchesTheDiff` — recomputes `git diff --name-status` against the base
+  commit named above and requires the "N files in total: A added, M modified" sentence to match it,
+  requires every ADDED file to be named here, and re-derives the behaviour/rename split with the same
+  rule the table below states, failing if a `.go` file that changes behaviour is not named. It skips
+  — individually, printing the reason — only when there is no `.git` or no `git`, which is the
+  extracted-module-zip case and never this repository.
 
 ### `go.mod` / `go.sum`
 
