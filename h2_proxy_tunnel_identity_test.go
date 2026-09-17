@@ -305,3 +305,99 @@ func TestH2ProxyTunnelSpeaksTheProfilesHTTP2Identity(t *testing.T) {
 	t.Logf("the proxy tunnel speaks the profile's HTTP/2: SETTINGS %v, WINDOW_UPDATE %d, embedded "+
 		"PRIORITY present, :method without indexing", obs.settings, obs.windowUpdate)
 }
+
+// TestProxyTLSVerificationIsOnUnlessTheCallerTurnedItOff is the SECURE direction of patch 3.
+//
+// The wire test above proves that a caller who ASKS for InsecureSkipVerify gets it on the proxy leg.
+// That is only one half, and the dangerous half is the other one: nothing proved that a caller who
+// does NOT ask still verifies the proxy's certificate. Hard-coding `insecureSkipVerify: true` in
+// newProxyTLSVerify — which silently disables certificate verification on every https:// proxy
+// connection for every caller of this library — used to leave the whole suite green.
+//
+// Two layers, because a projection that is right and a dial that ignores it are different failures:
+// the table checks what newProxyTLSVerify projects, and the wire half drives the shipped
+// NewHttpClient against a self-signed loopback proxy and requires the handshake to be REFUSED.
+func TestProxyTLSVerificationIsOnUnlessTheCallerTurnedItOff(t *testing.T) {
+	t.Run("newProxyTLSVerify carries the caller's answer, both ways", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			asked bool
+		}{
+			{"caller did not ask to skip verification", false},
+			{"caller asked to skip verification", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := &httpClientConfig{
+					insecureSkipVerify: tc.asked,
+					clientProfile:      profiles.Chrome_133,
+				}
+				if got := newProxyTLSVerify(cfg).insecureSkipVerify; got != tc.asked {
+					t.Fatalf("the caller's insecureSkipVerify is %v and the proxy leg gets %v. "+
+						"A proxy leg that skips verification the caller never asked for accepts ANY "+
+						"certificate on every https:// proxy connection this library makes",
+						tc.asked, got)
+				}
+			})
+		}
+	})
+
+	t.Run("the shipped client refuses a self-signed proxy it was not told to trust", func(t *testing.T) {
+		ln := listenTLSALPNH2(t)
+		// The SAME loopback proxy the insecure wire test drives, so the only difference between the
+		// two is whether the caller asked to skip verification. It answers the CONNECT with 200,
+		// which is what makes a client that got through observable on `out`.
+		out := make(chan proxyTunnelObservation, 4)
+		errc := make(chan error, 4)
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go serveH2ProxyOnce(conn, out, errc)
+			}
+		}()
+
+		client, err := NewHttpClient(NewNoopLogger(),
+			WithClientProfile(profiles.Chrome_133),
+			// deliberately NO WithInsecureSkipVerify
+			WithTimeoutSeconds(5),
+			WithDisableHttp3(),
+			WithProxyUrl("https://"+ln.Addr().String()),
+		)
+		if err != nil {
+			t.Fatalf("NewHttpClient: %v", err)
+		}
+		t.Cleanup(client.CloseIdleConnections)
+
+		req, err := http.NewRequest(http.MethodGet, "https://origin.invalid/", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, doErr := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		// The proxy only ever sees a CONNECT if the TLS handshake to it COMPLETED.
+		select {
+		case obs := <-out:
+			t.Fatalf("the client tunnelled a CONNECT (%v) through a self-signed https:// proxy it "+
+				"was never told to trust: certificate verification is off on the proxy leg for "+
+				"callers who never asked for it, so this library would accept ANY certificate from "+
+				"ANY https:// proxy", obs.settings)
+		default:
+		}
+
+		if doErr == nil {
+			t.Fatal("the request through a self-signed https:// proxy succeeded for a client that " +
+				"never asked for InsecureSkipVerify")
+		}
+		if !strings.Contains(doErr.Error(), "certificate") && !strings.Contains(doErr.Error(), "x509") {
+			t.Fatalf("the proxy dial failed with %q, which is not a certificate rejection. The proxy "+
+				"leg is supposed to verify by default; a different failure means this test is no "+
+				"longer observing verification at all", doErr)
+		}
+		t.Logf("the proxy leg refused the self-signed certificate: %v", doErr)
+	})
+}
