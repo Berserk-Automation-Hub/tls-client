@@ -129,9 +129,11 @@ func wireSettingsOrder(t3 *http3.Transport) []uint64 {
 // same every time.
 //
 // The config is the shape a caller supplies through the CFFI surface when they give h3Settings and
-// no h3SettingsOrder — which is also what every in-tree profile except Chrome_144/Chrome_133_PSK
-// looks like. Before the fix that produced no AdditionalSettingsOrder at all, so all three ids fell
-// through to the Go map range and the frame's order was redrawn on every connection.
+// no h3SettingsOrder — which is also what 78 of the 83 in-tree profiles look like (all but
+// chrome_144, chrome_144_PSK, firefox_147, firefox_147_PSK and firefox_148, the only five that
+// declare an http3SettingsOrder). Before the fix that produced no AdditionalSettingsOrder at all,
+// so all three ids fell through to the Go map range and the frame's order was redrawn on every
+// connection.
 func TestHTTP3SettingsOrderIsStableOnTheWire(t *testing.T) {
 	cfg := &http3Config{
 		http3Settings: map[uint64]uint64{

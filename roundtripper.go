@@ -324,9 +324,11 @@ const (
 // were structurally impossible to name before this: 0x6 SETTINGS_MAX_FIELD_SECTION_SIZE and 0x33
 // SETTINGS_H3_DATAGRAM are added by the frame itself, not by AdditionalSettings, so a profile's own
 // http3SettingsOrder could name them only by naming ids the profile does not carry. And a profile
-// that declares NO order — which is every in-tree profile except Chrome_144 and Chrome_133_PSK —
-// got no order at all, so its entire SETTINGS frame was randomly ordered, a different H3
-// fingerprint on every process start.
+// that declares NO order got no order at all, so its entire SETTINGS frame was randomly ordered, a
+// different H3 fingerprint on every process start — which is 78 of the 83 profiles in
+// profiles.MappedTLSClients, every one of them except chrome_144, chrome_144_PSK, firefox_147,
+// firefox_147_PSK and firefox_148. (Those five are enumerated from the map by a test, not read off
+// this comment: see TestPATCHESMDHTTP3SettingsOrderFiguresMatchTheProfiles.)
 //
 // The order produced is: the profile's own declaration first and unchanged, then every remaining
 // emitted id in ASCENDING numeric order, then the random GREASE id last. Ascending is a TIE-BREAK,

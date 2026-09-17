@@ -79,7 +79,7 @@ CHECKED — `patches_doc_test.go` recomputes the diff and fails if this section 
 | `roundtripper.go` | the origin Transport takes its identity from `h2Identity`; complete, deterministic HTTP/3 SETTINGS order (patches 2, 8) |
 | `connect.go` | `connectDialer` gains `h2 *h2Identity` and `tlsVerify proxyTLSVerify`; the tunnel Transport and the proxy TLS dial use them (patches 2, 3, 5) |
 | `client.go` | both `newConnectDialer` call sites pass `newH2Identity(...)` and `newProxyTLSVerify(...)` (patches 2, 3, 5) |
-| `racer.go` | the HTTP/3 race waits on the CALLER's context, not a ten-second literal (patch 7) |
+| `racer.go` | the HTTP/3 race waits on the CALLER's context, not a ten-second literal, and each attempt runs on its own child of it so the winner can actually stop the loser (patch 7) |
 
 ### Modified, import path only — 43 `.go` files
 
@@ -122,7 +122,17 @@ behind. `patches_doc_test.go` now reads this document and fails when it drifts:
   requires every ADDED file to be named here, and re-derives the behaviour/rename split with the same
   rule the table below states, failing if a `.go` file that changes behaviour is not named. It skips
   — individually, printing the reason — only when there is no `.git` or no `git`, which is the
-  extracted-module-zip case and never this repository.
+  extracted-module-zip case and never this repository. A base commit that this clone does NOT
+  contain is a FAILURE, not a skip: it used to skip, which left the 40-hex SHA unguarded in the one
+  direction the document has already been wrong in.
+- `TestPATCHESMDUpstreamVersionIsTheTagAtItsBase` — the version NAME beside that SHA, which nothing
+  checked. It prefers a tag already in the clone and otherwise asks the upstream URL this document
+  names (`git ls-remote --tags`), requiring the tag at the base commit to be the version claimed and
+  the claimed version to be upstream's newest release tag. With no local tag and no network it skips
+  individually, printing the error that stopped it, rather than passing.
+- `TestPATCHESMDHTTP3SettingsOrderFiguresMatchTheProfiles` — the two figures patch 8 states about
+  the profile set, ENUMERATED from `profiles.MappedTLSClients`. The document once named the wrong
+  pair of profiles here; the list now comes from the map.
 
 ### `go.mod` / `go.sum`
 
@@ -163,28 +173,38 @@ FAILURES FIXED BY THIS FORK: none
 
 `gofmt -l .` prints exactly one file in **both** trees — `profiles/contributed_browser_profiles.go`,
 an upstream file this fork does not touch — so the gofmt baseline is identical to upstream's.
-`go build ./...` is clean. `go vet ./...` reports the same upstream `unkeyed fields` diagnostics in
-`profiles/` in both trees and nothing else.
+`go build ./...` is clean. `go vet -composites=true ./...` reports **56** `unkeyed fields`
+diagnostics in **both** trees and nothing else — 5 in `example/main.go`, 9 in
+`profiles/contributed_browser_profiles.go`, 40 in `profiles/internal_browser_profiles.go`, 2 in
+`profiles/internal_custom_profiles.go`, all upstream literals this fork does not touch. (The flag is
+spelled explicitly because a plain `go vet ./...` can serve a CACHED result for a package and print
+fewer; an earlier revision of this document recorded that cached output as if it were the tree's.)
 
 Runs that show one extra red are a **network flake**, not a regression: `tests/` dials live external
 hosts. The extra failure is not stable (`TestClient_HeaderOrderWithContentLengthHttp1` in one run,
 `TestHTTP3WithChromeOnCloudflare` in another) and both pass on re-run in **this fork and the pristine
-baseline alike**.
+baseline alike**. The run recorded above for this tag did show that one extra red in the fork's
+`tests/`; it was then re-run **3 times in each tree and passed 3/3 in both**, and a second full
+`tests/` run in the fork came back to the single shared pre-existing failure. It is recorded rather
+than hidden.
 
 ### Coverage of this module's own package
 
 `go test . -coverprofile` on `github.com/Berserk-Automation-Hub/tls-client`:
 
 ```
-before patches 7 and 8:  43.0% of statements
-after:                   47.0% of statements
+before patches 7 and 8:                 43.0% of statements
+after patches 7 and 8:                  47.0% of statements
+after the patch-7 loser-cancel, the
+  secure direction of patch 3 and the
+  two new documentation guards:         48.9% of statements
 ```
 
 Every function this fork adds is covered by this fork's own tests, not only by the consumer:
 
 ```
-h2identity.go  newH2Identity 100.0%   enablesPush 100.0%   apply 100.0%   newProxyTLSVerify 100.0%
-racer.go       raceContext   100.0%   startRace   100.0%
+h2identity.go   newH2Identity 100.0%  enablesPush 100.0%  apply 100.0%  newProxyTLSVerify 100.0%
+racer.go        raceContext   100.0%  raceAttempt 100.0%  startRace 93.8%  waitForRaceWinner 87.5%
 roundtripper.go completeHTTP3SettingsOrder 96.7%   buildHTTP3Transport 76.5%
 ```
 
@@ -380,12 +400,41 @@ Nothing changes unless the caller set one of those options, and setting them alr
 `TransportOptions.Certificates` is `utls.Certificate` — utls is a fork, not an alias, so the two
 types are unrelated. Converting on a guess would be inventing behaviour; it is recorded here instead.
 
-### Test
+### Tests — BOTH directions, because only one of them is dangerous
 
-The patch-2 wire test is the test: it drives `NewHttpClient` with `WithInsecureSkipVerify()` against a
-self-signed loopback proxy. Ablated by deleting the two `tls.Config` lines, it reports
-`remote error: tls: bad certificate` with the diagnosis attached, which is the failure a caller would
-have hit.
+The patch-2 wire test covers the direction a caller asks for: it drives `NewHttpClient` with
+`WithInsecureSkipVerify()` against a self-signed loopback proxy. Ablated by deleting the two
+`tls.Config` lines, it reports `remote error: tls: bad certificate` with the diagnosis attached,
+which is the failure a caller would have hit.
+
+That is half a guard, and it was the half that mattered least. Nothing proved the SECURE direction —
+that a caller who does NOT ask for `InsecureSkipVerify` still verifies the proxy's certificate — so
+hard-coding `insecureSkipVerify: true` in `newProxyTLSVerify`, which silently accepts any
+certificate from any `https://` proxy for every caller of this library, left the whole suite green.
+
+`TestProxyTLSVerificationIsOnUnlessTheCallerTurnedItOff` closes it at two layers, because a
+projection that is right and a dial that ignores it are different failures:
+
+- the projection — `newProxyTLSVerify` over both answers, asserting the proxy leg gets exactly what
+  the caller said;
+- the wire — the SHIPPED `NewHttpClient` with **no** `WithInsecureSkipVerify()`, against the same
+  self-signed loopback proxy the insecure test uses. The proxy answers the CONNECT with 200, so a
+  client that got through is visible as an observation; the test requires none, and requires the
+  error to be a certificate rejection rather than any other failure.
+
+Ablation, `newProxyTLSVerify` hard-coding `insecureSkipVerify: true`:
+
+```
+--- FAIL: .../newProxyTLSVerify_carries_the_caller's_answer,_both_ways/caller_did_not_ask_to_skip_verification
+    the caller's insecureSkipVerify is false and the proxy leg gets true. A proxy leg that skips
+    verification the caller never asked for accepts ANY certificate on every https:// proxy
+    connection this library makes
+--- FAIL: .../the_shipped_client_refuses_a_self-signed_proxy_it_was_not_told_to_trust (5.00s)
+    the client tunnelled a CONNECT ([HEADER_TABLE_SIZE ENABLE_PUSH INITIAL_WINDOW_SIZE
+    MAX_HEADER_LIST_SIZE]) through a self-signed https:// proxy it was never told to trust:
+    certificate verification is off on the proxy leg for callers who never asked for it, so this
+    library would accept ANY certificate from ANY https:// proxy
+```
 
 ## Patch 4 — server push follows the SETTINGS frame the identity advertises
 
@@ -519,7 +568,7 @@ regression diff — is part of the patch, not commentary on it. Every one of tho
 once; they are now derived mechanically (the commands are in "The exact file inventory" and
 "Verification") and every change to this fork must re-derive them.
 
-## Patch 7 — the HTTP/3 race waits on the CALLER's deadline, not a ten-second literal
+## Patch 7 — the HTTP/3 race waits on the CALLER's deadline, and actually stops the loser
 
 `racer.go`.
 
@@ -543,22 +592,73 @@ directions:
   the request failed with `context deadline exceeded` while the caller's own deadline, and both
   in-flight attempts, still had time left.
 
-### The fix
+### And what was ALSO wrong, and was NOT fixed by the first attempt at this patch
+
+The old code paired that literal with a `cancel()` the comments described as "the winner stops the
+loser". **It never did.** Both attempts were launched with the caller's untouched `*http.Request`:
 
 ```go
-func raceContext(req *http.Request) (context.Context, context.CancelFunc) {
-	return context.WithCancel(req.Context())
+go pr.attemptHTTP3(req, resultCh)
+go pr.attemptHTTP2(req, addr, getTransportFunc, resultCh)
+```
+
+so the only context either attempt could observe was `req.Context()`, and the context the racer held
+a cancel for was one *neither of them had ever seen*. `cancel()` in `waitForRaceWinner` cancelled
+only the context that function was itself selecting on, one statement before returning — and
+`startRace`'s own `defer cancel()` fired a moment later regardless. The loser was never stopped, and
+switching the parent from `context.Background()` to `req.Context()` did not change that: it made the
+cancel *derived from the right context* and still *reaching nobody*.
+
+The first revision of this document claimed otherwise ("so the winner can still stop the loser the
+moment it wins — which is what the old `cancel()` did"). That sentence was false in both halves.
+The loser goes on dialing and handshaking, holding a socket and a goroutine, for as long as its own
+stack allows: for the HTTP/3 attempt against a host that answers nothing, that is QUIC's whole
+handshake idle timeout after the caller's request has already been answered.
+
+### The fix
+
+TWO elements, because the deadline and the loser are different defects that happened to share a
+line.
+
+```go
+// the context the race WAITS on: the caller's, plain, with no derived cancel of its own
+func raceContext(req *http.Request) context.Context {
+	return req.Context()
+}
+
+// the context each ATTEMPT RUNS on: its own cancellable child, on its own copy of the request
+func raceAttempt(req *http.Request) (*http.Request, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(req.Context())
+	return req.WithContext(ctx), cancel
 }
 ```
 
-The deadline `WithTimeoutSeconds` installs is already on `req.Context()`, so deriving from it makes
-the race end exactly when the caller said, in both directions, with nothing new to plumb.
-`WithCancel` rather than plain `req.Context()` so the winner can still stop the loser the moment it
-wins — which is what the old `cancel()` did and is the only thing that context was good for.
+The deadline `WithTimeoutSeconds` installs is already on `req.Context()`, so waiting on it directly
+makes the race end exactly when the caller said, in both directions, with nothing new to plumb. A
+derived context there would only be cancellable by the racer, and the racer has nothing to say about
+when the CALLER's wait should end.
+
+Stopping the loser happens where a cancel can actually reach an attempt: on the attempt's own
+request. `startRace` builds one per attempt and `waitForRaceWinner` cancels **the loser's, and only
+the loser's**, keyed on the winning protocol:
+
+```go
+h3Req, stopHTTP3 := raceAttempt(req)
+h2Req, stopHTTP2 := raceAttempt(req)
+go pr.attemptHTTP3(h3Req, resultCh)
+go pr.attemptHTTP2(h2Req, addr, getTransportFunc, resultCh)
+```
+
+**Per-attempt and not one shared child**, because the winner's context must SURVIVE: fhttp's HTTP/2
+transport and quic-go's HTTP/3 transport both abort the stream when the request context is
+cancelled, so one shared cancel would hand the caller a response whose body is already dead. The
+winner's child is deliberately left uncancelled and ends with its parent — the caller's request —
+which is exactly the lifetime the response body has. When NOBODY wins there is no body to protect,
+so `startRace` releases both.
 
 ### Guards
 
-`race_timeout_test.go`, two of them, because the failure modes differ:
+`race_timeout_test.go`, four of them, because the failure modes differ:
 
 - `TestRaceContextIsTheCallersNotATenSecondLiteral` — the DEADLINE. Three cases (3s, 60s, none) and
   the assertion is that the race's deadline **equals the request's**, so it catches the
@@ -568,6 +668,19 @@ wins — which is what the old `cancel()` did and is the only thing that context
   with an HTTP/2 attempt held open by a transport factory that never returns, a 250ms caller
   deadline, and a 5-second ceiling — still half the old literal, so a run that reaches it is the
   defect and not a slow machine.
+- `TestStartRaceStopsTheLoserAndNotTheWinner` — the LOSER, and the winner's survival, asserted
+  together because they pull in opposite directions. It drives the real `startRace`: the HTTP/2
+  attempt is a stub transport that answers immediately and therefore wins, and the HTTP/3 attempt is
+  held in flight by a loopback UDP socket that swallows its QUIC Initial packets and never answers.
+  Three assertions — the winner's request context is NOT the caller's (so the two attempts do not
+  share one), the winner's context is NOT cancelled when `startRace` returns, and the goroutine
+  running the HTTP/3 attempt is off the stack within 2s instead of waiting out QUIC's handshake idle
+  timeout.
+- `TestStartRaceStopsBothAttemptsWhenNobodyWins` — the other end of the same contract. The HTTP/3
+  attempt is failed without touching the network (`buildHTTP3Transport` refuses a non-SOCKS5 proxy,
+  because only SOCKS5 can tunnel QUIC's UDP) and the HTTP/2 stub returns an error, so the caller's
+  context is still alive when the race gives up; both derived contexts must be released and the
+  caller's must not be.
 
 Ablation, restoring `context.WithTimeout(context.Background(), 10*time.Second)`:
 
@@ -584,6 +697,44 @@ race_timeout_test.go:131: the caller's request expired after 250ms and the race 
     literal that the client's WithTimeoutSeconds cannot shorten
 --- FAIL: TestRaceContextIsTheCallersNotATenSecondLiteral (0.00s)
 --- FAIL: TestStartRaceStopsWhenTheCallersDeadlinePasses (5.00s)
+```
+
+Ablation, launching both attempts with the caller's untouched `req` — which is what the code did
+before this revision, and the state in which this patch was once called complete:
+
+```
+--- FAIL: TestStartRaceStopsTheLoserAndNotTheWinner (0.30s)
+    the winning attempt was launched with the CALLER's request unchanged. Both attempts then share
+    one context, so no cancel can stop one without stopping the other — which is how the loser came
+    to be left running
+```
+
+Ablation, keeping the per-attempt contexts but never cancelling the loser:
+
+```
+--- FAIL: TestStartRaceStopsTheLoserAndNotTheWinner (2.31s)
+    the HTTP/2 attempt won the race and the HTTP/3 attempt was still in flight 2s later, against a
+    UDP black hole at 127.0.0.1:55255. The loser is not being cancelled: both attempts are running
+    on a context the racer cannot reach, so the losing dial holds its socket until QUIC's own
+    handshake idle timeout
+```
+
+Ablation, cancelling BOTH on a win — the naive fix, and the reason the winner's survival is asserted:
+
+```
+--- FAIL: TestStartRaceStopsTheLoserAndNotTheWinner (0.30s)
+    the WINNER's request context is already cancelled (context canceled) when startRace returns.
+    The caller has not read the body yet and both transports abort the stream on request-context
+    cancellation, so this hands back a dead response
+```
+
+Ablation, deleting the nobody-won cleanup:
+
+```
+--- FAIL: TestStartRaceStopsBothAttemptsWhenNobodyWins (0.30s)
+    no attempt won, yet the HTTP/2 attempt's derived context is still uncancelled after startRace
+    returned. Nothing depends on it — there is no response body — so it stays registered on the
+    caller's context for the rest of the request, once per race
 ```
 
 ### Reachability (HR-7), measured
@@ -631,9 +782,14 @@ then writes everything LEFT by ranging over a Go map, whose iteration order Go d
 randomises. Upstream set `AdditionalSettingsOrder` only `if len(cfg.http3SettingsOrder) > 0`, and two
 things made that insufficient:
 
-1. **A profile that declares no order got no order at all.** That is every in-tree profile except
-   `Chrome_144` and `Chrome_133_PSK` — 78 of the 83 in `profiles.MappedTLSClients` — so the whole
-   SETTINGS frame went out in Go map order, a different H3 fingerprint on every process start.
+1. **A profile that declares no order got no order at all.** Exactly five profiles declare an
+   `http3SettingsOrder` — `chrome_144`, `chrome_144_PSK`, `firefox_147`, `firefox_147_PSK` and
+   `firefox_148` — so for 78 of the 83 in `profiles.MappedTLSClients` the whole SETTINGS frame went
+   out in Go map order, a different H3 fingerprint on every process start. (An earlier revision of
+   this document named the five as "`Chrome_144` and `Chrome_133_PSK`". `Chrome_133_PSK` declares no
+   order at all. The set is now ENUMERATED from the map by
+   `TestPATCHESMDHTTP3SettingsOrderFiguresMatchTheProfiles`, which fails if this paragraph and the
+   map disagree again.)
 2. **Two ids could not be named even by a profile that does declare an order.** `0x6`
    `SETTINGS_MAX_FIELD_SECTION_SIZE` and `0x33` `SETTINGS_H3_DATAGRAM` are contributed by the frame
    itself, not by `AdditionalSettings`, so they are invisible to this module's maps.
@@ -650,9 +806,13 @@ browser's order states it and is followed exactly, which is why the declaration 
 untouched; ascending only decides the ids the profile could not name, and the alternative to a
 tie-break here is not "the browser's order", it is a coin flip per connection.
 
-For `Chrome_144` the result is byte-identical to before (`[1, 0x6, 7, 0x33, GREASE]` — its
-declaration already covered everything). For the other 78 profiles a random order becomes a fixed
-one.
+For `chrome_144` the bytes are unchanged, but NOT because its declaration already covered
+everything — it declares `[1, 0x6, 7, 0x33]` and does not name the random GREASE id, which is
+contributed by `buildHTTP3Transport` itself. Completing the order appends that one id, and one
+leftover id ranges deterministically whichever way the map is walked, so the frame happened to be
+stable already; it is now stable BY CONSTRUCTION rather than by there being nothing to shuffle. The
+ablation below reddens `chrome_144` and `chrome_144_PSK` for exactly that reason. For the 78
+profiles that declare no order at all, a random order becomes a fixed one.
 
 ### Guards
 
@@ -672,7 +832,8 @@ Ablations, one per element:
 
 ```
 restore upstream's `if len(cfg.http3SettingsOrder) > 0` logic
-  78 of 83 subtests red, e.g.:
+  80 of 83 subtests red — the three that survive are firefox_147, firefox_147_PSK and firefox_148,
+  whose declared order names every id they emit (they send no GREASE setting) — e.g.:
   profile chrome_133: the HTTP/3 SETTINGS frame will carry [0x33], and AdditionalSettingsOrder ([])
   names none of them. quic-go-utls writes every setting the order does not name by ranging over a
   Go map (http3/frames.go, settingsFrame.Append), and Go randomises map iteration, so those ids land

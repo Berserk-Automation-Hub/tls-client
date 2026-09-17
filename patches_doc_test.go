@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Berserk-Automation-Hub/tls-client/profiles"
 )
 
 // PATCHES.md's FRONT MATTER IS PART OF THE PATCH, and these are its guards.
@@ -110,9 +113,16 @@ func TestPATCHESMDFileInventoryMatchesTheDiff(t *testing.T) {
 	}
 	base := bm[1]
 
+	// NOT a skip. This used to skip when the named base was absent, which made the document's base
+	// commit unguarded in the one direction the fork has already been wrong in: replacing the SHA
+	// with a 40-hex string that names nothing left the package green. An absent base means either
+	// the document names a commit that does not exist or this clone was truncated below it; both
+	// are conditions under which the inventory below CANNOT be trusted, and neither is a pass.
 	if out, err := exec.Command("git", "cat-file", "-e", base+"^{commit}").CombinedOutput(); err != nil {
-		t.Skipf("the base commit %s named by PATCHES.md is not in this clone (%v: %s), so the diff "+
-			"cannot be recomputed here", base, err, strings.TrimSpace(string(out)))
+		t.Fatalf("PATCHES.md names upstream base %s and this clone has no such commit (%v: %s). "+
+			"Every figure in the inventory is measured against that commit, so either the SHA is "+
+			"wrong or this clone is truncated below it — run `git fetch --unshallow` and re-run "+
+			"before believing the inventory", base, err, strings.TrimSpace(string(out)))
 	}
 
 	out, err := exec.Command("git", "diff", "--name-status", base, "HEAD").Output()
@@ -206,4 +216,174 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Slice(ks, func(i, j int) bool { return m[ks[i]] < m[ks[j]] })
 	return ks
+}
+
+// TestPATCHESMDUpstreamVersionIsTheTagAtItsBase is the guard on the OTHER half of "## Upstream base":
+// the version NAME. TestPATCHESMDFileInventoryMatchesTheDiff checks the 40-hex commit; nothing
+// checked the `v1.16.0` beside it, and a fork claiming the wrong upstream version is exactly the
+// kind of stale front matter this file exists to catch — the same document has already shipped a
+// wrong patch count and a wrong behaviour claim.
+//
+// The claim is only checkable against UPSTREAM, so this asks upstream. It prefers a tag already in
+// this clone (offline, no network at all) and falls back to `git ls-remote` on the upstream URL the
+// document itself names. When neither is available it skips INDIVIDUALLY, printing the error that
+// prevented it, rather than passing.
+func TestPATCHESMDUpstreamVersionIsTheTagAtItsBase(t *testing.T) {
+	doc := readPatchesMD(t)
+
+	baseRE := regexp.MustCompile(`commit ` + "`" + `([0-9a-f]{40})` + "`")
+	bm := baseRE.FindStringSubmatch(doc)
+	if bm == nil {
+		t.Fatal("PATCHES.md no longer names its upstream base as `commit <40-hex>`")
+	}
+	base := bm[1]
+
+	verRE := regexp.MustCompile(`\*\*` + "`" + `(v\d+\.\d+\.\d+)` + "`" + `\*\*`)
+	vm := verRE.FindStringSubmatch(doc)
+	if vm == nil {
+		t.Fatal("PATCHES.md's \"## Upstream base\" section no longer states the upstream version as " +
+			"**`vX.Y.Z`**. The version name is what a reader uses to find the upstream tree; the SHA " +
+			"beside it is checked elsewhere, and the two have to agree.")
+	}
+	claimed := vm[1]
+
+	urlRE := regexp.MustCompile(`https://github\.com/bogdanfinn/[a-z0-9-]+\.git`)
+	um := urlRE.FindString(doc)
+	if um == "" {
+		t.Fatal("PATCHES.md no longer names the upstream repository URL, so this guard has nothing " +
+			"to ask about the version it claims")
+	}
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not on PATH (%v), so the upstream tag cannot be resolved", err)
+	}
+
+	// 1. Offline: a tag already in this clone that points at the base commit.
+	if out, err := exec.Command("git", "tag", "--points-at", base).Output(); err == nil {
+		for _, tag := range strings.Fields(string(out)) {
+			if tag == claimed {
+				t.Logf("upstream version %s confirmed offline: a local tag points at %s", claimed, base[:12])
+				return
+			}
+		}
+	}
+
+	// 2. Otherwise ask upstream. tagsAtUpstream returns the name(s) pointing at base and the newest
+	// release tag, so both sentences in "## Upstream base" are checked in one round trip.
+	at, newest, err := tagsAtUpstream(um, base)
+	if err != nil {
+		t.Skipf("cannot reach %s to resolve the upstream tag at %s (%v), and no local tag points at "+
+			"it either, so PATCHES.md's claim of %s is unverifiable here — it is NOT assumed true",
+			um, base[:12], err, claimed)
+	}
+
+	if len(at) == 0 {
+		t.Fatalf("PATCHES.md says its upstream base is %s, and %s publishes NO tag at commit %s. "+
+			"The version name and the SHA in \"## Upstream base\" do not describe the same upstream "+
+			"tree", claimed, um, base[:12])
+	}
+	found := false
+	for _, tag := range at {
+		if tag == claimed {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("PATCHES.md says this fork is based on upstream %s, and the tag upstream actually "+
+			"publishes at commit %s is %v. A fork that names the wrong upstream version sends every "+
+			"reader of this document to the wrong tree", claimed, base[:12], at)
+	}
+
+	// The document also asserts the base is upstream's NEWEST release, i.e. the fork is not behind.
+	if newest != "" && newest != claimed {
+		t.Fatalf("PATCHES.md says %s \"is also the newest tag upstream publishes\", and upstream's "+
+			"newest release tag is %s. This fork is behind upstream and the document says it is not",
+			claimed, newest)
+	}
+	t.Logf("upstream version checked against %s: %s at %s, newest release tag %s", um, claimed, base[:12], newest)
+}
+
+// tagsAtUpstream lists the release tags upstream publishes, returning those that point at base
+// (dereferencing annotated tags) and the highest one by numeric version.
+func tagsAtUpstream(url, base string) (at []string, newest string, err error) {
+	out, err := exec.Command("git", "ls-remote", "--tags", url).Output()
+	if err != nil {
+		return nil, "", err
+	}
+	release := regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)$`)
+	sha := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		name := strings.TrimPrefix(f[1], "refs/tags/")
+		deref := strings.HasSuffix(name, "^{}")
+		name = strings.TrimSuffix(name, "^{}")
+		if !release.MatchString(name) {
+			continue
+		}
+		// An annotated tag's ^{} line is the commit it points at and wins over the tag object's own.
+		if _, seen := sha[name]; !seen || deref {
+			sha[name] = f[0]
+		}
+	}
+	var best [3]int
+	for name, s := range sha {
+		if s == base {
+			at = append(at, name)
+		}
+		m := release.FindStringSubmatch(name)
+		var v [3]int
+		for i := 0; i < 3; i++ {
+			v[i], _ = strconv.Atoi(m[i+1])
+		}
+		if v[0] > best[0] || (v[0] == best[0] && (v[1] > best[1] || (v[1] == best[1] && v[2] > best[2]))) {
+			best, newest = v, name
+		}
+	}
+	sort.Strings(at)
+	return at, newest, nil
+}
+
+// TestPATCHESMDHTTP3SettingsOrderFiguresMatchTheProfiles guards the two figures patch 8's section
+// states about the profile set, both of which were WRONG when first written: the document named
+// "Chrome_144 and Chrome_133_PSK" as the profiles that declare an http3SettingsOrder, and
+// Chrome_133_PSK declares none.
+//
+// The set is ENUMERATED from profiles.MappedTLSClients here, so the document cannot drift from it
+// again and a new upstream profile that declares an order turns this red until it is recorded.
+func TestPATCHESMDHTTP3SettingsOrderFiguresMatchTheProfiles(t *testing.T) {
+	doc := readPatchesMD(t)
+
+	var withOrder []string
+	for name, p := range profiles.MappedTLSClients {
+		if len(p.GetHttp3SettingsOrder()) > 0 {
+			withOrder = append(withOrder, name)
+		}
+	}
+	sort.Strings(withOrder)
+	total := len(profiles.MappedTLSClients)
+	without := total - len(withOrder)
+
+	want := fmt.Sprintf("%d of the %d", without, total)
+	if !strings.Contains(doc, want) {
+		t.Fatalf("PATCHES.md must state the size of the affected profile set as %q: %d of the %d "+
+			"profiles in profiles.MappedTLSClients declare no http3SettingsOrder and had a randomly "+
+			"ordered HTTP/3 SETTINGS frame before patch 8", want, without, total)
+	}
+
+	var missing []string
+	for _, name := range withOrder {
+		if !strings.Contains(doc, "`"+name+"`") {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("the profiles that DO declare an http3SettingsOrder are %v, and PATCHES.md does not "+
+			"name %v as `name`. The document named the wrong pair once already — it said "+
+			"\"Chrome_144 and Chrome_133_PSK\" while Chrome_133_PSK declares no order at all — and "+
+			"the list has to come from the map, not from memory", withOrder, missing)
+	}
+	t.Logf("profiles declaring an http3SettingsOrder: %v (%d of %d declare none)", withOrder, without, total)
 }
