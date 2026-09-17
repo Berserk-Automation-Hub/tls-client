@@ -226,3 +226,119 @@ func TestHTTP3SettingsOrderKeepsTheProfilesOwnDeclarationFirst(t *testing.T) {
 		}
 	})
 }
+
+// TestHTTP3SettingsOrderCompletionIsAscendingAndGreaseLast pins the two decisions completion makes
+// about the ids the caller did NOT name, both of which used to be invisible.
+//
+// TestHTTP3SettingsOrderIsStableOnTheWire only asks that the order not move between reads, so
+// flipping the tie-break from ascending to DESCENDING left every HTTP/3 subtest green: a stable
+// wrong order is still stable. And nothing asserted that the random GREASE id lands LAST rather than
+// in numeric position, although its value is redrawn per transport, so a GREASE id sorted by value
+// would put a DIFFERENT id in a different slot on every build -- the exact nondeterminism this patch
+// exists to remove.
+func TestHTTP3SettingsOrderCompletionIsAscendingAndGreaseLast(t *testing.T) {
+	t.Run("ids the caller did not name are appended in ASCENDING order", func(t *testing.T) {
+		cfg := &http3Config{
+			// Declared descending on purpose so "ascending" cannot be confused with "as given".
+			http3Settings: map[uint64]uint64{7: 100, 1: 65536},
+			// no http3SettingsOrder: every emitted id is completion's to order
+		}
+		rt, err := buildHTTP3Transport(cfg)
+		if err != nil {
+			t.Fatalf("buildHTTP3Transport: %v", err)
+		}
+		t3 := rt.(*http3.Transport)
+
+		want := make([]uint64, 0, 4)
+		for id := range emittedH3SettingIDs(t3) {
+			want = append(want, id)
+		}
+		sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+		if len(want) < 3 {
+			t.Fatalf("this transport emits only %v; with fewer than three ids ascending and "+
+				"descending are too close to tell apart", want)
+		}
+
+		got := t3.AdditionalSettingsOrder
+		if len(got) != len(want) {
+			t.Fatalf("AdditionalSettingsOrder is %v, the emitted ids are %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("the HTTP/3 SETTINGS order for a caller who declared none is %v; completing "+
+					"an order appends the ids the declaration could not name in ASCENDING numeric "+
+					"order, which is %v. The tie-break is arbitrary but it is not free: it is the "+
+					"only thing standing between this profile and a Go map's iteration order, so it "+
+					"has to be ONE fixed rule that every build of every process agrees on",
+					got, want)
+			}
+		}
+		t.Logf("undeclared ids completed ascending: %v", got)
+	})
+
+	t.Run("the random GREASE id goes LAST, not in numeric position", func(t *testing.T) {
+		p := profiles.Chrome_144
+		if p.GetHttp3PriorityParam() == 0 {
+			t.Skip("this profile sends no GREASE setting, so there is nothing here to place")
+		}
+		rt, err := buildHTTP3Transport(h3ConfigFor(p))
+		if err != nil {
+			t.Fatalf("buildHTTP3Transport: %v", err)
+		}
+		t3 := rt.(*http3.Transport)
+
+		// The GREASE id is the one buildHTTP3Transport added: present in AdditionalSettings and
+		// absent from the profile's own declaration.
+		declared := p.GetHttp3Settings()
+		var grease []uint64
+		for id := range t3.AdditionalSettings {
+			if _, ok := declared[id]; !ok {
+				grease = append(grease, id)
+			}
+		}
+		if len(grease) != 1 {
+			t.Fatalf("expected exactly one id in AdditionalSettings that the profile does not "+
+				"declare (the GREASE one); found %v", grease)
+		}
+		order := t3.AdditionalSettingsOrder
+		if len(order) == 0 || order[len(order)-1] != grease[0] {
+			t.Fatalf("the HTTP/3 SETTINGS order is %v and the GREASE id is 0x%x: GREASE must be the "+
+				"LAST id, because its value is redrawn for every transport. Sorting it by value "+
+				"instead would move a different id into a different slot on every process start, "+
+				"which is the nondeterminism this patch removes", order, grease[0])
+		}
+		t.Logf("GREASE 0x%x is last in %v", grease[0], order)
+	})
+
+	t.Run("a declaration that repeats an id is deduplicated", func(t *testing.T) {
+		// h3SettingsOrder is caller-supplied through cffi_src/types.go, so a repeated id is a shape
+		// this module receives rather than one it generates. settingsFrame.Append DELETES an id from
+		// its map once it has written it, so the second mention writes nothing and every id after it
+		// in the order shifts one place forward -- a silently different SETTINGS frame.
+		cfg := &http3Config{
+			http3Settings:      map[uint64]uint64{1: 65536, 7: 100},
+			http3SettingsOrder: []uint64{7, 1, 7},
+		}
+		rt, err := buildHTTP3Transport(cfg)
+		if err != nil {
+			t.Fatalf("buildHTTP3Transport: %v", err)
+		}
+		got := rt.(*http3.Transport).AdditionalSettingsOrder
+
+		seen := map[uint64]int{}
+		for _, id := range got {
+			seen[id]++
+			if seen[id] > 1 {
+				t.Fatalf("the caller declared [7 1 7] and the completed order is %v: 0x%x is named "+
+					"twice. quic-go-utls deletes an id as it writes it, so the repeat writes nothing "+
+					"and drops the id that would have followed it out of the position the caller "+
+					"asked for", got, id)
+			}
+		}
+		if len(got) < 2 || got[0] != 7 || got[1] != 1 {
+			t.Fatalf("the caller declared [7 1 7] and the completed order is %v; the first mention "+
+				"of each id is the caller's declaration and must be copied verbatim in front", got)
+		}
+		t.Logf("declaration [7 1 7] completed to %v", got)
+	})
+}

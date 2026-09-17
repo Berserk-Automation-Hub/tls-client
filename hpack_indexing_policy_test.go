@@ -56,6 +56,15 @@ type hpackPolicyTestServer struct {
 // negotiates h2. Callers use WithInsecureSkipVerify, so the certificate only has to parse.
 func listenTLSALPNH2(t *testing.T) net.Listener {
 	t.Helper()
+	ln, _ := listenTLSALPNH2Cert(t)
+	return ln
+}
+
+// listenTLSALPNH2Cert is listenTLSALPNH2 for the tests that need the self-signed certificate itself
+// -- the ones that put it in a caller's TransportOptions.RootCAs and require the proxy leg to accept
+// it WITHOUT InsecureSkipVerify.
+func listenTLSALPNH2Cert(t *testing.T) (net.Listener, *x509.Certificate) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -72,6 +81,10 @@ func listenTLSALPNH2(t *testing.T) net.Listener {
 	if err != nil {
 		t.Fatalf("self-sign: %v", err)
 	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse self-signed certificate: %v", err)
+	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
 		NextProtos:   []string{"h2"},
@@ -80,7 +93,7 @@ func listenTLSALPNH2(t *testing.T) net.Listener {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	return ln
+	return ln, leaf
 }
 
 func startHPACKPolicyServer(t *testing.T) *hpackPolicyTestServer {
